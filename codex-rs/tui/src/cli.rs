@@ -56,4 +56,24 @@ pub struct Cli {
 
     #[clap(skip)]
     pub config_overrides: CliConfigOverrides,
+
+    /// Browse previous sessions before starting (interactive selector).
+    #[arg(long = "history", default_value_t = false)]
+    pub history: bool,
+
+    /// View a saved rollout file and exit (path to ~/.codex/sessions/*.json).
+    #[arg(long = "view", value_name = "FILE")]
+    pub view: Option<PathBuf>,
+
+    /// Resume from a saved rollout file by injecting a prompt.
+    #[arg(long = "resume", value_name = "FILE")]
+    pub resume: Option<PathBuf>,
+
+    /// Experimental: resume by loading the rollout on the backend (equivalent to -c experimental_resume=...)
+    #[arg(long = "resume-experimental", value_name = "FILE")]
+    pub resume_experimental: Option<PathBuf>,
+
+    /// Attempt to resume using a provider/server conversation id (provider-specific; optional).
+    #[arg(long = "resume-server", value_name = "TOKEN/ID")]
+    pub resume_server: Option<String>,
 }

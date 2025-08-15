@@ -158,6 +158,10 @@ pub struct Config {
 
     /// The value for the `originator` header included with Responses API requests.
     pub internal_originator: Option<String>,
+
+    /// Optional token used to resume a server-side stored conversation
+    /// (e.g., previous_response_id for providers that support stored responses).
+    pub provider_resume_token: Option<String>,
 }
 
 impl Config {
@@ -660,6 +664,7 @@ impl Config {
             experimental_resume,
             include_plan_tool: include_plan_tool.unwrap_or(false),
             internal_originator: cfg.internal_originator,
+            provider_resume_token: None,
         };
         Ok(config)
     }
@@ -1023,6 +1028,7 @@ disable_response_storage = true
                 base_instructions: None,
                 include_plan_tool: false,
                 internal_originator: None,
+                provider_resume_token: None,
             },
             o3_profile_config
         );
@@ -1074,6 +1080,7 @@ disable_response_storage = true
             base_instructions: None,
             include_plan_tool: false,
             internal_originator: None,
+            provider_resume_token: None,
         };
 
         assert_eq!(expected_gpt3_profile_config, gpt3_profile_config);
@@ -1140,6 +1147,7 @@ disable_response_storage = true
             base_instructions: None,
             include_plan_tool: false,
             internal_originator: None,
+            provider_resume_token: None,
         };
 
         assert_eq!(expected_zdr_profile_config, zdr_profile_config);

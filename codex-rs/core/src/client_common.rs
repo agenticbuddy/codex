@@ -31,6 +31,9 @@ pub struct Prompt {
 
     /// Whether to store response on server side (disable_response_storage = !store).
     pub store: bool,
+    /// When set, ask the API to use the referenced previous response as context
+    /// instead of sending the full transcript. Only used when `store == true`.
+    pub previous_response_id: Option<String>,
 
     /// Tools available to the model, including additional tools sourced from
     /// external MCP servers.
@@ -154,6 +157,8 @@ pub(crate) struct ResponsesApiRequest<'a> {
     pub(crate) include: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) prompt_cache_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) previous_response_id: Option<&'a str>,
 }
 
 pub(crate) fn create_reasoning_param_for_request(

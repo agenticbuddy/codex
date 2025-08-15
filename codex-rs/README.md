@@ -86,6 +86,28 @@ codex --sandbox danger-full-access
 
 The same setting can be persisted in `~/.codex/config.toml` via the top-level `sandbox_mode = "MODE"` key, e.g. `sandbox_mode = "workspace-write"`.
 
+### Sessions and Restore
+
+- Browse previous sessions: `codex --history`
+  - Use ←/→ to cycle actions for the selected session: [View] [Resume] [Exp. Resume] [Server Resume].
+  - Enter performs the selected action; Esc/Ctrl+C closes the popup.
+- View: inserts only user/assistant messages from the saved session into scrollback, auto‑focusing the latest messages.
+- Resume: pre‑fills the composer with `Resume this session: <path>` so you can continue locally.
+- Exp. Resume: prints a short hint for resuming via the experimental flag.
+- Server Resume: attempts to resume using a provider/server resume token if available.
+  - Codex persists a `provider_resume_token` (for OpenAI this corresponds to `previous_response_id`) to your session file when a response completes.
+  - The token may appear either in the JSONL header or a subsequent `record_type = "state"` line. The popup reads both.
+  - You can also supply a token explicitly with `--resume-server <TOKEN>` to seed the next request.
+
+Related flags:
+
+- `--view <rollout.jsonl>`: open a saved rollout in place (read‑only).
+- `--resume <rollout.jsonl>`: continue locally by injecting a resume prompt.
+- `--resume-experimental <rollout.jsonl>`: same, but via an experimental path.
+- `--resume-server <TOKEN>`: resume using a provider/server token; if your saved session contains a token, the popup offers “Server Resume”.
+
+Where sessions live: `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`.
+
 ## Code Organization
 
 This folder is the root of a Cargo workspace. It contains quite a bit of experimental code, but here are the key crates:

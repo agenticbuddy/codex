@@ -175,6 +175,11 @@ impl ModelClient {
             stream: true,
             include,
             prompt_cache_key: Some(self.session_id.to_string()),
+            previous_response_id: if store {
+                prompt.previous_response_id.as_deref()
+            } else {
+                None
+            },
         };
 
         let mut attempt = 0;

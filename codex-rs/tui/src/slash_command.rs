@@ -19,6 +19,7 @@ pub enum SlashCommand {
     Mention,
     Status,
     Prompts,
+    Sessions,
     Logout,
     Quit,
     #[cfg(debug_assertions)]
@@ -37,6 +38,7 @@ impl SlashCommand {
             SlashCommand::Mention => "mention a file",
             SlashCommand::Status => "show current session configuration and token usage",
             SlashCommand::Prompts => "show example prompts",
+            SlashCommand::Sessions => "browse previous sessions (view or resume)",
             SlashCommand::Logout => "log out of Codex",
             #[cfg(debug_assertions)]
             SlashCommand::TestApproval => "test approval request",

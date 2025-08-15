@@ -31,6 +31,19 @@ pub struct SessionMeta {
     pub id: Uuid,
     pub timestamp: String,
     pub instructions: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")] 
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")] 
+    pub version: Option<String>,
+    /// Provider/server resume token (e.g., previous_response_id) if available.
+    #[serde(skip_serializing_if = "Option::is_none")] 
+    pub provider_resume_token: Option<String>,
+    /// Recorded project root at the time the session started.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recorded_project_root: Option<String>,
+    /// Recorded current working directory at the time the session started.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recorded_cwd: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -42,7 +55,10 @@ struct SessionMetaWithGit {
 }
 
 #[derive(Serialize, Deserialize, Default, Clone)]
-pub struct SessionStateSnapshot {}
+pub struct SessionStateSnapshot {
+    #[serde(skip_serializing_if = "Option::is_none")] 
+    pub provider_resume_token: Option<String>,
+}
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct SavedSession {
@@ -107,6 +123,25 @@ impl RolloutRecorder {
         // Spawn a Tokio task that owns the file handle and performs async
         // writes. Using `tokio::fs::File` keeps everything on the async I/O
         // driver instead of blocking the runtime.
+        // Detect project root relative to the provided cwd (Config::cwd)
+        fn detect_project_root(start: &std::path::Path) -> std::path::PathBuf {
+            let mut dir = start.to_path_buf();
+            loop {
+                let agents = dir.join("AGENTS.md");
+                let dotgit = dir.join(".git");
+                if agents.is_file() || dotgit.exists() {
+                    return dir;
+                }
+                let parent = dir.parent().map(|p| p.to_path_buf());
+                match parent {
+                    Some(p) if p != dir => dir = p,
+                    _ => return start.to_path_buf(),
+                }
+            }
+        }
+
+        let recorded_root = detect_project_root(&cwd);
+
         tokio::task::spawn(rollout_writer(
             tokio::fs::File::from_std(file),
             rx,
@@ -114,6 +149,11 @@ impl RolloutRecorder {
                 timestamp,
                 id: session_id,
                 instructions,
+                model: Some(config.model.clone()),
+                version: Some(env!("CARGO_PKG_VERSION").to_string()),
+                provider_resume_token: None,
+                recorded_project_root: Some(recorded_root.display().to_string()),
+                recorded_cwd: Some(cwd.display().to_string()),
             }),
             cwd,
         ));

@@ -176,6 +176,17 @@ impl ChatComposer {
         true
     }
 
+    pub(crate) fn set_text(&mut self, text: &str) {
+        self.textarea.set_text(text);
+        // place cursor at end of text for a natural editing experience
+        self.textarea.set_cursor(self.textarea.text().len());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn get_text_for_test(&self) -> &str {
+        self.textarea.text()
+    }
+
     /// Integrate results from an asynchronous file search.
     pub(crate) fn on_file_search_result(&mut self, query: String, matches: Vec<FileMatch>) {
         // Only apply if user is still editing a token starting with `query`.

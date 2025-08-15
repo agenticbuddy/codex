@@ -36,6 +36,7 @@ pub struct Submission {
 #[allow(clippy::large_enum_variant)]
 #[non_exhaustive]
 pub enum Op {
+    // Session configuration is handled at spawn-time; no Op here.
     /// Abort current task.
     /// This server sends no corresponding Event
     Interrupt,
@@ -80,6 +81,15 @@ pub enum Op {
     Compact,
     /// Request to shut down codex instance.
     Shutdown,
+
+    /// Update the resume token used for server-side continuation (e.g., previous_response_id).
+    SetResumeToken {
+        token: String,
+    },
+
+    /// Optional handshake to validate readiness to resume using the current provider resume token.
+    /// This should not modify conversation state or transcript.
+    HandshakeResume,
 }
 
 /// Determines the conditions under which the user is consulted to approve

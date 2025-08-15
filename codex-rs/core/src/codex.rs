@@ -150,6 +150,7 @@ impl Codex {
             notify: config.notify.clone(),
             cwd: config.cwd.clone(),
             resume_path,
+            resume_server: config.provider_resume_token.clone(),
         };
 
         // Generate a unique ID for the lifetime of this Codex session.
@@ -211,6 +212,8 @@ struct State {
     pending_approvals: HashMap<String, oneshot::Sender<ReviewDecision>>,
     pending_input: Vec<ResponseInputItem>,
     history: ConversationHistory,
+    /// Provider/server resume token (e.g., previous_response_id) for server-based resume.
+    provider_resume_token: Option<String>,
 }
 
 /// Context for an initialized model agent
@@ -289,6 +292,8 @@ struct ConfigureSession {
     cwd: PathBuf,
 
     resume_path: Option<PathBuf>,
+    /// Optional token used to resume a server-side stored conversation (e.g., previous_response_id).
+    resume_server: Option<String>,
 }
 
 impl Session {
@@ -311,6 +316,7 @@ impl Session {
             notify,
             cwd,
             resume_path,
+            resume_server,
         } = configure_session;
         debug!("Configuring session: model={model}; provider={provider:?}");
         if !cwd.is_absolute() {
@@ -407,6 +413,17 @@ impl Session {
         };
         if let Some(restored_items) = restored_items {
             state.history.record_items(&restored_items);
+            // Synthesize aborted outputs for any unclosed tool calls to ensure
+            // the resumed turn starts from a consistent state.
+            let aborted = synthesize_aborts_from_items(&restored_items);
+            if !aborted.is_empty() {
+                state.pending_input.extend(aborted);
+            }
+        }
+
+        // Seed provider resume token if supplied via CLI/config.
+        if state.provider_resume_token.is_none() {
+            state.provider_resume_token = resume_server;
         }
 
         let writable_roots = get_writable_roots(&cwd);
@@ -525,6 +542,37 @@ impl Session {
             .map_or_else(|| self.cwd.clone(), |p| self.cwd.join(p))
     }
 
+/// Synthesize function_call_output("aborted") for any tool calls that were not
+/// closed in the restored transcript so the next turn can proceed deterministically.
+fn synthesize_aborts_from_items(items: &[ResponseItem]) -> Vec<ResponseInputItem> {
+    let mut open: HashSet<String> = HashSet::new();
+    for it in items {
+        match it {
+            ResponseItem::FunctionCall { call_id, .. } => {
+                open.insert(call_id.clone());
+            }
+            ResponseItem::LocalShellCall { call_id, .. } => {
+                if let Some(id) = call_id.clone() {
+                    open.insert(id);
+                }
+            }
+            ResponseItem::FunctionCallOutput { call_id, .. } => {
+                open.remove(call_id);
+            }
+            _ => {}
+        }
+    }
+    open
+        .into_iter()
+        .map(|id| ResponseInputItem::FunctionCallOutput {
+            call_id: id,
+            output: FunctionCallOutputPayload {
+                content: "aborted".to_string(),
+                success: Some(false),
+            },
+        })
+        .collect()
+}
     pub fn set_task(&self, task: AgentTask) {
         let mut state = self.state.lock().unwrap();
         if let Some(current_task) = state.current_task.take() {
@@ -624,7 +672,7 @@ impl Session {
     }
 
     async fn record_state_snapshot(&self, items: &[ResponseItem]) {
-        let snapshot = { crate::rollout::SessionStateSnapshot {} };
+        let snapshot = { crate::rollout::SessionStateSnapshot { provider_resume_token: None } };
 
         let recorder = {
             let guard = self.rollout.lock().unwrap();
@@ -1073,6 +1121,35 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                 }
                 break;
             }
+            Op::SetResumeToken { token } => {
+                if let Some(sess_arc) = &sess {
+                    let mut st = sess_arc.state.lock().unwrap();
+                    st.provider_resume_token = Some(token);
+                } else {
+                    send_no_session_event(sub.id).await;
+                }
+            }
+            Op::HandshakeResume => {
+                if let Some(sess_arc) = &sess {
+                    let has = sess_arc
+                        .state
+                        .lock()
+                        .unwrap()
+                        .provider_resume_token
+                        .is_some();
+                    if has {
+                        sess_arc
+                            .notify_background_event(&sub.id, "resume_token_confirmed")
+                            .await;
+                    } else {
+                        sess_arc
+                            .notify_background_event(&sub.id, "resume_token_missing")
+                            .await;
+                    }
+                } else {
+                    send_no_session_event(sub.id).await;
+                }
+            }
         }
     }
     debug!("Agent loop exited");
@@ -1284,6 +1361,9 @@ async fn run_turn(
     let prompt = Prompt {
         input,
         store: !sess.disable_response_storage,
+        previous_response_id: (!sess.disable_response_storage)
+            .then(|| sess.state.lock().unwrap().provider_resume_token.clone())
+            .flatten(),
         tools,
         base_instructions_override: sess.base_instructions.clone(),
     };
@@ -1437,7 +1517,7 @@ async fn try_run_turn(
                 output.push(ProcessedResponseItem { item, response });
             }
             ResponseEvent::Completed {
-                response_id: _,
+                response_id,
                 token_usage,
             } => {
                 if let Some(token_usage) = token_usage {
@@ -1458,6 +1538,25 @@ async fn try_run_turn(
                         msg,
                     };
                     let _ = sess.tx_event.send(event).await;
+                }
+
+                // Persist provider resume token (response_id) to state and rollout.
+                {
+                    let mut st = sess.state.lock().unwrap();
+                    st.provider_resume_token = Some(response_id.clone());
+                }
+                {
+                    let recorder = {
+                        let guard = sess.rollout.lock().unwrap();
+                        guard.as_ref().cloned()
+                    };
+                    if let Some(rec) = recorder {
+                        let _ = rec
+                            .record_state(crate::rollout::SessionStateSnapshot {
+                                provider_resume_token: Some(response_id.clone()),
+                            })
+                            .await;
+                    }
                 }
 
                 return Ok(output);
@@ -1524,6 +1623,11 @@ async fn run_compact_task(
     let prompt = Prompt {
         input: turn_input,
         store: !sess.disable_response_storage,
+        previous_response_id: if !sess.disable_response_storage {
+            sess.state.lock().unwrap().provider_resume_token.as_deref().map(|s| s.to_string())
+        } else {
+            None
+        },
         tools: Vec::new(),
         base_instructions_override: Some(compact_instructions.clone()),
     };
