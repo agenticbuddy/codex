@@ -675,10 +675,21 @@ impl ChatWidget<'_> {
         self.add_to_history(&history_cell::new_prompts_output());
     }
 
+    pub(crate) fn open_sessions_popup(&mut self) {
+        let codex_home = self.config.codex_home.clone();
+        self.bottom_pane
+            .show_view(Box::new(crate::bottom_pane::sessions_popup::SessionsPopup::new(
+                codex_home,
+            )));
+    }
+
     /// Forward file-search results to the bottom pane.
     pub(crate) fn apply_file_search_result(&mut self, query: String, matches: Vec<FileMatch>) {
         self.bottom_pane.on_file_search_result(query, matches);
     }
+
+    /// Called when the restore overlay finishes; currently a no-op placeholder.
+    pub(crate) fn on_restore_completed(&mut self, _approx_tokens: usize, _segments: usize) {}
 
     /// Handle Ctrl-C key press.
     /// Returns CancellationEvent::Handled if the event was consumed by the UI, or

@@ -542,37 +542,6 @@ impl Session {
             .map_or_else(|| self.cwd.clone(), |p| self.cwd.join(p))
     }
 
-/// Synthesize function_call_output("aborted") for any tool calls that were not
-/// closed in the restored transcript so the next turn can proceed deterministically.
-fn synthesize_aborts_from_items(items: &[ResponseItem]) -> Vec<ResponseInputItem> {
-    let mut open: HashSet<String> = HashSet::new();
-    for it in items {
-        match it {
-            ResponseItem::FunctionCall { call_id, .. } => {
-                open.insert(call_id.clone());
-            }
-            ResponseItem::LocalShellCall { call_id, .. } => {
-                if let Some(id) = call_id.clone() {
-                    open.insert(id);
-                }
-            }
-            ResponseItem::FunctionCallOutput { call_id, .. } => {
-                open.remove(call_id);
-            }
-            _ => {}
-        }
-    }
-    open
-        .into_iter()
-        .map(|id| ResponseInputItem::FunctionCallOutput {
-            call_id: id,
-            output: FunctionCallOutputPayload {
-                content: "aborted".to_string(),
-                success: Some(false),
-            },
-        })
-        .collect()
-}
     pub fn set_task(&self, task: AgentTask) {
         let mut state = self.state.lock().unwrap();
         if let Some(current_task) = state.current_task.take() {
@@ -672,7 +641,11 @@ fn synthesize_aborts_from_items(items: &[ResponseItem]) -> Vec<ResponseInputItem
     }
 
     async fn record_state_snapshot(&self, items: &[ResponseItem]) {
-        let snapshot = { crate::rollout::SessionStateSnapshot { provider_resume_token: None } };
+        let snapshot = {
+            crate::rollout::SessionStateSnapshot {
+                provider_resume_token: None,
+            }
+        };
 
         let recorder = {
             let guard = self.rollout.lock().unwrap();
@@ -930,6 +903,39 @@ fn synthesize_aborts_from_items(items: &[ResponseItem]) -> Vec<ResponseInputItem
     }
 }
 
+/// Synthesize function_call_output("aborted") for any tool/function calls that
+/// do not have a matching output in the restored transcript. This reconciles
+/// half-finished turns so the next turn can proceed deterministically.
+fn synthesize_aborts_from_items(items: &[ResponseItem]) -> Vec<ResponseInputItem> {
+    let mut open: HashSet<String> = HashSet::new();
+    for it in items {
+        match it {
+            ResponseItem::FunctionCall { call_id, .. } => {
+                open.insert(call_id.clone());
+            }
+            ResponseItem::LocalShellCall { call_id, .. } => {
+                if let Some(id) = call_id.clone() {
+                    open.insert(id);
+                }
+            }
+            ResponseItem::FunctionCallOutput { call_id, .. } => {
+                open.remove(call_id);
+            }
+            _ => {}
+        }
+    }
+    open
+        .into_iter()
+        .map(|id| ResponseInputItem::FunctionCallOutput {
+            call_id: id,
+            output: FunctionCallOutputPayload {
+                content: "aborted".to_string(),
+                success: Some(false),
+            },
+        })
+        .collect()
+}
+
 impl Drop for Session {
     fn drop(&mut self) {
         self.abort();
@@ -1122,32 +1128,24 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                 break;
             }
             Op::SetResumeToken { token } => {
-                if let Some(sess_arc) = &sess {
-                    let mut st = sess_arc.state.lock().unwrap();
-                    st.provider_resume_token = Some(token);
-                } else {
-                    send_no_session_event(sub.id).await;
-                }
+                let mut st = sess.state.lock().unwrap();
+                st.provider_resume_token = Some(token);
             }
             Op::HandshakeResume => {
-                if let Some(sess_arc) = &sess {
-                    let has = sess_arc
-                        .state
-                        .lock()
-                        .unwrap()
-                        .provider_resume_token
-                        .is_some();
-                    if has {
-                        sess_arc
-                            .notify_background_event(&sub.id, "resume_token_confirmed")
-                            .await;
-                    } else {
-                        sess_arc
-                            .notify_background_event(&sub.id, "resume_token_missing")
-                            .await;
-                    }
+                let has = sess
+                    .state
+                    .lock()
+                    .unwrap()
+                    .provider_resume_token
+                    .is_some();
+                if has {
+                    sess
+                        .notify_background_event(&sub.id, "resume_token_confirmed")
+                        .await;
                 } else {
-                    send_no_session_event(sub.id).await;
+                    sess
+                        .notify_background_event(&sub.id, "resume_token_missing")
+                        .await;
                 }
             }
         }
@@ -1624,7 +1622,12 @@ async fn run_compact_task(
         input: turn_input,
         store: !sess.disable_response_storage,
         previous_response_id: if !sess.disable_response_storage {
-            sess.state.lock().unwrap().provider_resume_token.as_deref().map(|s| s.to_string())
+            sess.state
+                .lock()
+                .unwrap()
+                .provider_resume_token
+                .as_deref()
+                .map(|s| s.to_string())
         } else {
             None
         },

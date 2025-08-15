@@ -194,7 +194,7 @@ mod tests {
     use crate::app_event::AppEvent;
     use crate::bottom_pane::{BottomPane, BottomPaneParams};
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
-    use ratatui::widgets::WidgetRef;
+    // unused import
     use std::sync::mpsc::channel;
 
     #[test]
@@ -232,7 +232,7 @@ mod tests {
     fn timer_reaches_completion() {
         let (tx_raw, _rx) = channel::<AppEvent>();
         let tx = crate::app_event_sender::AppEventSender::new(tx_raw);
-        let mut pane = BottomPane::new(BottomPaneParams { app_event_tx: tx, has_input_focus: true, enhanced_keys_supported: false });
+        let _pane = BottomPane::new(BottomPaneParams { app_event_tx: tx, has_input_focus: true, enhanced_keys_supported: false });
         let view = RestoreProgressView::new(3).with_duration(10);
         let area = Rect { x: 0, y: 0, width: 80, height: 1 };
         let mut buf = Buffer::empty(area);

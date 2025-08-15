@@ -47,6 +47,8 @@ mod shimmer;
 mod slash_command;
 mod status_indicator_widget;
 mod streaming;
+mod experimental_restore;
+mod transcript;
 mod text_formatting;
 mod tui;
 mod user_approval_widget;

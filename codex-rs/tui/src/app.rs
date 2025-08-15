@@ -272,6 +272,11 @@ impl App<'_> {
                         widget.on_commit_tick();
                     }
                 }
+                AppEvent::RestoreCompleted { approx_tokens, segments } => {
+                    if let AppState::Chat { widget } = &mut self.app_state {
+                        widget.on_restore_completed(approx_tokens, segments);
+                    }
+                }
                 AppEvent::KeyEvent(key_event) => {
                     match key_event {
                         KeyEvent {
@@ -415,6 +420,11 @@ impl App<'_> {
                     SlashCommand::Prompts => {
                         if let AppState::Chat { widget } = &mut self.app_state {
                             widget.add_prompts_output();
+                        }
+                    }
+                    SlashCommand::Sessions => {
+                        if let AppState::Chat { widget } = &mut self.app_state {
+                            widget.open_sessions_popup();
                         }
                     }
                     #[cfg(debug_assertions)]

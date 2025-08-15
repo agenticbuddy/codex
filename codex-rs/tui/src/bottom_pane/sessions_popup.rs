@@ -363,20 +363,6 @@ impl<'a> BottomPaneView<'a> for SessionsPopup {
                     self.on_enter(pane);
                 }
             }
-            crossterm::event::KeyEvent { code: KeyCode::Esc, .. } if self.confirming => {
-                // proceed in current cwd
-                let cur = self.project_root.display().to_string();
-                pane.app_event_tx.send(AppEvent::InsertHistory(vec![
-                    ratatui::text::Line::from(format!("Continuing in current working directory: {}", cur)).gray(),
-                    ratatui::text::Line::from("")
-                ]));
-                if let Some(act) = self.pending_action {
-                    self.confirming = false;
-                    self.pending_relaunch_root = None;
-                    self.action_idx = act as usize;
-                    self.on_enter(pane);
-                }
-            }
             crossterm::event::KeyEvent {
                 code: KeyCode::Char('c'),
                 modifiers: KeyModifiers::CONTROL,

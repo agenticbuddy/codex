@@ -31,12 +31,12 @@ pub struct SessionMeta {
     pub id: Uuid,
     pub timestamp: String,
     pub instructions: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")] 
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")] 
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     /// Provider/server resume token (e.g., previous_response_id) if available.
-    #[serde(skip_serializing_if = "Option::is_none")] 
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_resume_token: Option<String>,
     /// Recorded project root at the time the session started.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -56,7 +56,7 @@ struct SessionMetaWithGit {
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct SessionStateSnapshot {
-    #[serde(skip_serializing_if = "Option::is_none")] 
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_resume_token: Option<String>,
 }
 

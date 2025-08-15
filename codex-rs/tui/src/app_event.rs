@@ -57,6 +57,10 @@ pub(crate) enum AppEvent {
     StopCommitAnimation,
     CommitTick,
 
+    /// Restore overlay finished; carry approx token estimate and segments
+    /// so the chat layer can report provider usage on the next turn.
+    RestoreCompleted { approx_tokens: usize, segments: usize },
+
     /// Onboarding: result of login_with_chatgpt.
     OnboardingAuthComplete(Result<(), String>),
     OnboardingComplete(ChatWidgetArgs),

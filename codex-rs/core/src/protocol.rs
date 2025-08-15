@@ -83,9 +83,7 @@ pub enum Op {
     Shutdown,
 
     /// Update the resume token used for server-side continuation (e.g., previous_response_id).
-    SetResumeToken {
-        token: String,
-    },
+    SetResumeToken { token: String },
 
     /// Optional handshake to validate readiness to resume using the current provider resume token.
     /// This should not modify conversation state or transcript.

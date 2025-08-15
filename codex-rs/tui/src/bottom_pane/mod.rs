@@ -20,6 +20,9 @@ mod file_search_popup;
 mod popup_consts;
 mod scroll_state;
 mod selection_popup_common;
+pub(crate) mod sessions_popup;
+mod session_viewer;
+mod restore_progress_view;
 mod status_indicator_view;
 mod textarea;
 
@@ -60,7 +63,7 @@ pub(crate) struct BottomPaneParams {
     pub(crate) enhanced_keys_supported: bool,
 }
 
-impl BottomPane<'_> {
+impl<'a> BottomPane<'a> {
     const BOTTOM_PAD_LINES: u16 = 2;
     pub fn new(params: BottomPaneParams) -> Self {
         let enhanced_keys_supported = params.enhanced_keys_supported;
@@ -231,6 +234,22 @@ impl BottomPane<'_> {
         self.request_redraw();
     }
 
+    /// Update the status indicator text; creates the status view if needed.
+    pub(crate) fn update_status_text(&mut self, text: String) {
+        if !self.status_view_active {
+            let mut v = StatusIndicatorView::new(self.app_event_tx.clone());
+            v.update_text(text);
+            self.active_view = Some(Box::new(v));
+            self.status_view_active = true;
+        } else {
+            // Replace with a fresh view carrying the latest text.
+            let mut v = StatusIndicatorView::new(self.app_event_tx.clone());
+            v.update_text(text);
+            self.active_view = Some(Box::new(v));
+        }
+        self.request_redraw();
+    }
+
     /// Called when the agent requests user approval.
     pub fn push_approval_request(&mut self, request: ApprovalRequest) {
         let request = if let Some(view) = self.active_view.as_mut() {
@@ -281,6 +300,21 @@ impl BottomPane<'_> {
     pub(crate) fn on_file_search_result(&mut self, query: String, matches: Vec<FileMatch>) {
         self.composer.on_file_search_result(query, matches);
         self.request_redraw();
+    }
+
+    pub(crate) fn set_composer_text(&mut self, text: String) {
+        self.composer.set_text(&text);
+        self.request_redraw();
+    }
+
+    pub(crate) fn show_view(&mut self, view: Box<dyn BottomPaneView<'a> + 'a>) {
+        self.active_view = Some(view);
+        self.request_redraw();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn composer_text_for_test(&self) -> String {
+        self.composer.get_text_for_test().to_string()
     }
 }
 
