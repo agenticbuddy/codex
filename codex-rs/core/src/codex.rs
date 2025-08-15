@@ -906,6 +906,7 @@ impl Session {
 /// Synthesize function_call_output("aborted") for any tool/function calls that
 /// do not have a matching output in the restored transcript. This reconciles
 /// half-finished turns so the next turn can proceed deterministically.
+#[allow(dead_code)]
 fn synthesize_aborts_from_items(items: &[ResponseItem]) -> Vec<ResponseInputItem> {
     let mut open: HashSet<String> = HashSet::new();
     for it in items {

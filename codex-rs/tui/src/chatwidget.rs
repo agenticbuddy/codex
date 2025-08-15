@@ -87,6 +87,8 @@ pub(crate) struct ChatWidget<'a> {
     // Whether a redraw is needed after handling the current event
     needs_redraw: bool,
     session_id: Option<Uuid>,
+    // Post-restore estimate to be surfaced on the next TokenCount.
+    pending_restore_estimate: Option<(usize, usize)>,
 }
 
 struct UserMessage {
@@ -196,6 +198,16 @@ impl ChatWidget<'_> {
             self.last_token_usage.clone(),
             self.config.model_context_window,
         );
+        // If a restore just completed, surface a concise usage summary once.
+        if let Some((approx_tokens, segments)) = self.pending_restore_estimate.take() {
+            use ratatui::text::Line as RLine;
+            self.app_event_tx.send(AppEvent::InsertHistory(vec![
+                RLine::from(format!(
+                    "Restore summary: {} segments (~{} tokens).",
+                    segments, approx_tokens
+                )),
+            ]));
+        }
     }
 
     fn on_error(&mut self, message: String) {
@@ -296,6 +308,24 @@ impl ChatWidget<'_> {
 
     fn on_background_event(&mut self, message: String) {
         debug!("BackgroundEvent: {message}");
+        // Surface resume handshake status as a subtle history line.
+        use ratatui::style::Stylize;
+        match message.as_str() {
+            "resume_token_confirmed" => {
+                self.app_event_tx.send(AppEvent::InsertHistory(vec![
+                    ratatui::text::Line::from("Server resume ready (token confirmed).").gray(),
+                ]));
+            }
+            "resume_token_missing" => {
+                self.app_event_tx.send(AppEvent::InsertHistory(vec![
+                    ratatui::text::Line::from(
+                        "Server resume token missing; experimental restore is available.",
+                    )
+                    .gray(),
+                ]));
+            }
+            _ => {}
+        }
     }
     /// Periodic tick to commit at most one queued line to history with a small delay,
     /// animating the output.
@@ -520,6 +550,7 @@ impl ChatWidget<'_> {
             interrupts: InterruptManager::new(),
             needs_redraw: false,
             session_id: None,
+            pending_restore_estimate: None,
         }
     }
 
@@ -688,8 +719,10 @@ impl ChatWidget<'_> {
         self.bottom_pane.on_file_search_result(query, matches);
     }
 
-    /// Called when the restore overlay finishes; currently a no-op placeholder.
-    pub(crate) fn on_restore_completed(&mut self, _approx_tokens: usize, _segments: usize) {}
+    /// Called when the restore overlay finishes; store estimate for display on TokenCount.
+    pub(crate) fn on_restore_completed(&mut self, approx_tokens: usize, segments: usize) {
+        self.pending_restore_estimate = Some((approx_tokens, segments));
+    }
 
     /// Handle Ctrl-C key press.
     /// Returns CancellationEvent::Handled if the event was consumed by the UI, or
