@@ -21,6 +21,7 @@ use futures::prelude::*;
 use mcp_types::CallToolResult;
 use serde::Serialize;
 use serde_json;
+use serde_json::json;
 use tokio::sync::oneshot;
 use tokio::task::AbortHandle;
 use tracing::debug;
@@ -214,6 +215,8 @@ struct State {
     history: ConversationHistory,
     /// Provider/server resume token (e.g., previous_response_id) for server-based resume.
     provider_resume_token: Option<String>,
+    /// If set, will be recorded as a state line on the next user input.
+    pending_settings_changed: Option<serde_json::Value>,
 }
 
 /// Context for an initialized model agent
@@ -359,11 +362,13 @@ impl Session {
             session_id: Uuid,
             rollout_recorder: Option<RolloutRecorder>,
             restored_items: Option<Vec<ResponseItem>>,
+            saved_session: Option<crate::rollout::SavedSession>,
         }
         let rollout_result = match rollout_res {
             Ok((session_id, maybe_saved, recorder)) => {
+                let saved_clone = maybe_saved.clone();
                 let restored_items: Option<Vec<ResponseItem>> =
-                    maybe_saved.and_then(|saved_session| {
+                    saved_clone.and_then(|saved_session| {
                         if saved_session.items.is_empty() {
                             None
                         } else {
@@ -374,6 +379,7 @@ impl Session {
                     session_id,
                     rollout_recorder: Some(recorder),
                     restored_items,
+                    saved_session: maybe_saved,
                 }
             }
             Err(e) => {
@@ -396,6 +402,7 @@ impl Session {
                     session_id: Uuid::new_v4(),
                     rollout_recorder: None,
                     restored_items: None,
+                    saved_session: None,
                 }
             }
         };
@@ -404,6 +411,7 @@ impl Session {
             session_id,
             rollout_recorder,
             restored_items,
+            saved_session,
         } = rollout_result;
 
         // Create the mutable state for the Session.
@@ -418,6 +426,16 @@ impl Session {
             let aborted = synthesize_aborts_from_items(&restored_items);
             if !aborted.is_empty() {
                 state.pending_input.extend(aborted);
+            }
+        }
+
+        // If we resumed from a saved session, restore saved state (provider token, approvals).
+        if let Some(saved) = saved_session.as_ref() {
+            if let Some(tok) = saved.state.provider_resume_token.clone() {
+                state.provider_resume_token = Some(tok);
+            }
+            if let Some(approved) = saved.state.approved_commands.clone() {
+                state.approved_commands = approved.into_iter().collect();
             }
         }
 
@@ -441,6 +459,8 @@ impl Session {
                 (McpConnectionManager::default(), Default::default())
             }
         };
+
+        // (MCP availability recorded later after `sess` is constructed.)
 
         // Surface individual client start-up failures to the user.
         if !failed_clients.is_empty() {
@@ -503,6 +523,112 @@ impl Session {
             sess.sandbox_policy.clone(),
         )));
         sess.record_conversation_items(&conversation_items).await;
+
+        // Record/check MCP tools availability now that `sess` exists.
+        {
+            let recorded = saved_session
+                .as_ref()
+                .and_then(|s| s.state.mcp_tools_at_recording.clone());
+            let current: Vec<String> = sess
+                .mcp_connection_manager
+                .list_all_tools()
+                .keys()
+                .cloned()
+                .collect();
+            let recorder = {
+                let guard = sess.rollout.lock().unwrap();
+                guard.as_ref().cloned()
+            };
+            if let Some(rec) = recorder {
+                if recorded.is_none() {
+                    // First-time session start – record available tools
+                    let _ = rec
+                        .record_state(crate::rollout::SessionStateSnapshot {
+                            provider_resume_token: None,
+                            approved_commands: None,
+                            mcp_tools_at_recording: Some(current.clone()),
+                            mcp_tools_missing_on_restore: None,
+                        })
+                        .await;
+                } else if let Some(rec_tools) = recorded {
+                    let rec_set: std::collections::HashSet<_> = rec_tools.iter().cloned().collect();
+                    let cur_set: std::collections::HashSet<_> = current.iter().cloned().collect();
+                    let missing: Vec<String> = rec_set.difference(&cur_set).cloned().collect();
+                    if !missing.is_empty() {
+                        let _ = rec
+                            .record_state(crate::rollout::SessionStateSnapshot {
+                                provider_resume_token: None,
+                                approved_commands: None,
+                                mcp_tools_at_recording: None,
+                                mcp_tools_missing_on_restore: Some(missing.clone()),
+                            })
+                            .await;
+                        sess.notify_background_event(
+                            INITIAL_SUBMIT_ID,
+                            format!("mcp_tools_missing:{} {}", missing.len(), missing.join(", ")),
+                        )
+                        .await;
+                    }
+                }
+            }
+        }
+
+        // If resumed from a saved session, and effective config differs from header, prepare a settings_changed line to write on first user input.
+        if let Some(saved) = saved_session.as_ref() {
+            let header = &saved.session;
+            let mut from = serde_json::Map::new();
+            let mut to = serde_json::Map::new();
+            if let Some(m) = header.model.as_ref() {
+                from.insert("model".into(), serde_json::Value::String(m.clone()));
+                to.insert(
+                    "model".into(),
+                    serde_json::Value::String(config.model.clone()),
+                );
+            }
+            if let Some(eff) = header.reasoning_effort {
+                from.insert(
+                    "reasoning_effort".into(),
+                    serde_json::to_value(eff).unwrap_or(serde_json::Value::Null),
+                );
+                to.insert(
+                    "reasoning_effort".into(),
+                    serde_json::to_value(config.model_reasoning_effort)
+                        .unwrap_or(serde_json::Value::Null),
+                );
+            }
+            if let Some(sum) = header.reasoning_summary {
+                from.insert(
+                    "reasoning_summary".into(),
+                    serde_json::to_value(sum).unwrap_or(serde_json::Value::Null),
+                );
+                to.insert(
+                    "reasoning_summary".into(),
+                    serde_json::to_value(config.model_reasoning_summary)
+                        .unwrap_or(serde_json::Value::Null),
+                );
+            }
+            if let Some(sb) = header.sandbox_policy.as_ref() {
+                from.insert(
+                    "sandbox_policy".into(),
+                    serde_json::to_value(sb).unwrap_or(serde_json::Value::Null),
+                );
+                to.insert(
+                    "sandbox_policy".into(),
+                    serde_json::to_value(&config.sandbox_policy).unwrap_or(serde_json::Value::Null),
+                );
+            }
+            if from != to {
+                let v = serde_json::json!({
+                    "record_type": "state",
+                    "settings_changed": {
+                        "from": from,
+                        "to": to
+                    }
+                });
+                let mut st = sess.state.lock().unwrap();
+                st.pending_settings_changed = Some(v);
+            }
+        }
 
         // Dispatch the SessionConfiguredEvent first and then report any errors.
         let events = std::iter::once(Event {
@@ -642,8 +768,16 @@ impl Session {
 
     async fn record_state_snapshot(&self, items: &[ResponseItem]) {
         let snapshot = {
+            let st = self.state.lock().unwrap();
             crate::rollout::SessionStateSnapshot {
                 provider_resume_token: None,
+                approved_commands: if st.approved_commands.is_empty() {
+                    None
+                } else {
+                    Some(st.approved_commands.iter().cloned().collect())
+                },
+                mcp_tools_at_recording: None,
+                mcp_tools_missing_on_restore: None,
             }
         };
 
@@ -674,6 +808,11 @@ impl Session {
             cwd,
             apply_patch,
         } = exec_command_context;
+        // Clone for logging to avoid moving into the event payloads.
+        let call_id_for_log = call_id.clone();
+        let command_for_log = command_for_display.clone();
+        let cwd_for_log = cwd.clone();
+        let parsed_for_log = parse_command(&command_for_display);
         let msg = match apply_patch {
             Some(ApplyPatchCommandContext {
                 user_explicitly_approved_this_action,
@@ -699,6 +838,22 @@ impl Session {
             msg,
         };
         let _ = self.tx_event.send(event).await;
+
+        // Record tool_event (exec begin)
+        let ts = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_else(|_| "".to_string());
+        let value = json!({
+            "record_type": "tool_event",
+            "ts": ts,
+            "tool_kind": "exec",
+            "phase": "begin",
+            "call_id": call_id_for_log,
+            "command": command_for_log,
+            "cwd": cwd_for_log.display().to_string(),
+            "parsed": parsed_for_log,
+        });
+        self.record_tool_event_json(value).await;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -719,8 +874,10 @@ impl Session {
         // Because stdout and stderr could each be up to 100 KiB, we send
         // truncated versions.
         const MAX_STREAM_OUTPUT: usize = 5 * 1024; // 5KiB
-        let stdout = stdout.text.chars().take(MAX_STREAM_OUTPUT).collect();
-        let stderr = stderr.text.chars().take(MAX_STREAM_OUTPUT).collect();
+        let stdout: String = stdout.text.chars().take(MAX_STREAM_OUTPUT).collect();
+        let stderr: String = stderr.text.chars().take(MAX_STREAM_OUTPUT).collect();
+        let stdout_for_log = stdout.clone();
+        let stderr_for_log = stderr.clone();
 
         let msg = if is_apply_patch {
             EventMsg::PatchApplyEnd(PatchApplyEndEvent {
@@ -744,6 +901,25 @@ impl Session {
             msg,
         };
         let _ = self.tx_event.send(event).await;
+
+        // Record tool_event (exec end)
+        let ts = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_else(|_| "".to_string());
+        let success = *exit_code == 0;
+        let value = json!({
+            "record_type": "tool_event",
+            "ts": ts,
+            "tool_kind": "exec",
+            "phase": "end",
+            "call_id": call_id,
+            "exit_code": exit_code,
+            "duration_ms": duration.as_millis() as u64,
+            "stdout_trunc": stdout_for_log,
+            "stderr_trunc": stderr_for_log,
+            "success": success,
+        });
+        self.record_tool_event_json(value).await;
 
         // If this is an apply_patch, after we emit the end patch, emit a second event
         // with the full turn diff if there is one.
@@ -821,6 +997,17 @@ impl Session {
             }),
         };
         let _ = self.tx_event.send(event).await;
+    }
+
+    /// Helper to record a JSON tool_event line into the rollout file if recording is enabled.
+    pub(crate) async fn record_tool_event_json(&self, value: serde_json::Value) {
+        let recorder = {
+            let guard = self.rollout.lock().unwrap();
+            guard.as_ref().cloned()
+        };
+        if let Some(rec) = recorder {
+            let _ = rec.record_tool_event(value).await;
+        }
     }
 
     /// Build the full turn input by concatenating the current conversation
@@ -925,8 +1112,7 @@ fn synthesize_aborts_from_items(items: &[ResponseItem]) -> Vec<ResponseInputItem
             _ => {}
         }
     }
-    open
-        .into_iter()
+    open.into_iter()
         .map(|id| ResponseInputItem::FunctionCallOutput {
             call_id: id,
             output: FunctionCallOutputPayload {
@@ -1022,6 +1208,19 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                 sess.abort();
             }
             Op::UserInput { items } => {
+                // If there is a pending settings_changed state line, record it now (first user turn).
+                if sess
+                    .state
+                    .lock()
+                    .unwrap()
+                    .pending_settings_changed
+                    .is_some()
+                {
+                    let to_write = { sess.state.lock().unwrap().pending_settings_changed.take() };
+                    if let Some(v) = to_write {
+                        let _ = sess.record_tool_event_json(v).await;
+                    }
+                }
                 // attempt to inject input into current task
                 if let Err(items) = sess.inject_input(items) {
                     // no current task, spawn a new one
@@ -1133,19 +1332,12 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                 st.provider_resume_token = Some(token);
             }
             Op::HandshakeResume => {
-                let has = sess
-                    .state
-                    .lock()
-                    .unwrap()
-                    .provider_resume_token
-                    .is_some();
+                let has = sess.state.lock().unwrap().provider_resume_token.is_some();
                 if has {
-                    sess
-                        .notify_background_event(&sub.id, "resume_token_confirmed")
+                    sess.notify_background_event(&sub.id, "resume_token_confirmed")
                         .await;
                 } else {
-                    sess
-                        .notify_background_event(&sub.id, "resume_token_missing")
+                    sess.notify_background_event(&sub.id, "resume_token_missing")
                         .await;
                 }
             }
@@ -1553,6 +1745,9 @@ async fn try_run_turn(
                         let _ = rec
                             .record_state(crate::rollout::SessionStateSnapshot {
                                 provider_resume_token: Some(response_id.clone()),
+                                approved_commands: None,
+                                mcp_tools_at_recording: None,
+                                mcp_tools_missing_on_restore: None,
                             })
                             .await;
                     }

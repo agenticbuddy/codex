@@ -76,4 +76,16 @@ pub struct Cli {
     /// Attempt to resume using a provider/server conversation id (provider-specific; optional).
     #[arg(long = "resume-server", value_name = "TOKEN/ID")]
     pub resume_server: Option<String>,
+
+    /// Apply the session settings (model/effort/summary/sandbox) recorded in the rollout header when resuming.
+    #[arg(long = "apply-session-settings", default_value_t = false)]
+    pub apply_session_settings: bool,
+
+    /// Keep the current configuration even if it differs from the session header (requires explicit opt-in).
+    #[arg(long = "keep-current-config", default_value_t = false)]
+    pub keep_current_config: bool,
+
+    /// Automatically fall back to experimental local restore if server resume token is invalid (CLI).
+    #[arg(long = "auto-fallback-exp-restore", default_value_t = false)]
+    pub auto_fallback_exp_restore: bool,
 }

@@ -33,6 +33,7 @@ mod common;
 pub mod custom_terminal;
 mod diff_render;
 mod exec_command;
+mod experimental_restore;
 mod file_search;
 mod get_git_diff;
 mod history_cell;
@@ -47,9 +48,8 @@ mod shimmer;
 mod slash_command;
 mod status_indicator_widget;
 mod streaming;
-mod experimental_restore;
-mod transcript;
 mod text_formatting;
+mod transcript;
 mod tui;
 mod user_approval_widget;
 
@@ -266,6 +266,96 @@ fn run_ratatui_app(
         tracing::error!("panic: {info}");
         prev_hook(info);
     }));
+    // Preflight resume (CLI): enforce explicit choice on config drift.
+    let mut config = config;
+    if let Some(path) = cli.resume_experimental.as_ref() {
+        // Seed experimental resume + optional server token early so UI spawns in restored context.
+        config.experimental_resume = Some(path.clone());
+        if let Some(tok) = cli.resume_server.as_ref() {
+            config.provider_resume_token = Some(tok.clone());
+        }
+
+        // Read rollout header to compare settings.
+        if let Ok(text) = std::fs::read_to_string(path) {
+            if let Some(first_line) = text.lines().next() {
+                #[derive(serde::Deserialize)]
+                struct HeaderPreview {
+                    #[serde(default)]
+                    model: Option<String>,
+                    #[serde(default)]
+                    reasoning_effort: Option<codex_core::config_types::ReasoningEffort>,
+                    #[serde(default)]
+                    reasoning_summary: Option<codex_core::config_types::ReasoningSummary>,
+                    #[serde(default)]
+                    sandbox_policy: Option<codex_core::protocol::SandboxPolicy>,
+                }
+                if let Ok(header) = serde_json::from_str::<HeaderPreview>(first_line) {
+                    use std::fmt::Write as _;
+                    let mut drift = Vec::new();
+                    if let Some(h_model) = header.model.as_ref() {
+                        if *h_model != config.model {
+                            drift.push(format!(
+                                "model: session='{}' current='{}'",
+                                h_model, config.model
+                            ));
+                        }
+                    }
+                    if let Some(h_effort) = header.reasoning_effort {
+                        if h_effort != config.model_reasoning_effort {
+                            drift.push(format!(
+                                "reasoning_effort: session='{}' current='{}'",
+                                h_effort, config.model_reasoning_effort
+                            ));
+                        }
+                    }
+                    if let Some(h_summary) = header.reasoning_summary {
+                        if h_summary != config.model_reasoning_summary {
+                            drift.push(format!(
+                                "reasoning_summary: session='{}' current='{}'",
+                                h_summary, config.model_reasoning_summary
+                            ));
+                        }
+                    }
+                    if let Some(h_sandbox) = header.sandbox_policy.as_ref() {
+                        if *h_sandbox != config.sandbox_policy {
+                            drift.push(format!(
+                                "sandbox_policy: session='{}' current='{}'",
+                                h_sandbox, config.sandbox_policy
+                            ));
+                        }
+                    }
+                    if !drift.is_empty() && !(cli.apply_session_settings || cli.keep_current_config)
+                    {
+                        let mut msg = String::new();
+                        let _ = writeln!(msg, "Configuration differs from session header:");
+                        for line in drift {
+                            let _ = writeln!(msg, "{line}");
+                        }
+                        let _ = writeln!(
+                            msg,
+                            "Add --apply-session-settings to use the session settings, or --keep-current-config to continue with your current config."
+                        );
+                        return Err(color_eyre::eyre::eyre!(msg));
+                    }
+                    if cli.apply_session_settings {
+                        if let Some(h_model) = header.model {
+                            config.model = h_model;
+                        }
+                        if let Some(h_effort) = header.reasoning_effort {
+                            config.model_reasoning_effort = h_effort;
+                        }
+                        if let Some(h_summary) = header.reasoning_summary {
+                            config.model_reasoning_summary = h_summary;
+                        }
+                        if let Some(h_sandbox) = header.sandbox_policy {
+                            config.sandbox_policy = h_sandbox;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let mut terminal = tui::init(&config)?;
     terminal.clear()?;
 
@@ -273,7 +363,13 @@ fn run_ratatui_app(
     session_log::maybe_init(&config);
 
     let Cli { prompt, images, .. } = cli;
-    let mut app = App::new(config.clone(), prompt, images, should_show_trust_screen);
+    let mut app = App::new(
+        config.clone(),
+        prompt,
+        images,
+        should_show_trust_screen,
+        cli.auto_fallback_exp_restore,
+    );
 
     let app_result = app.run(&mut terminal);
     let usage = app.token_usage();

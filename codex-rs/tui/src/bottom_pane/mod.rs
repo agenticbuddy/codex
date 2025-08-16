@@ -18,11 +18,13 @@ mod chat_composer_history;
 mod command_popup;
 mod file_search_popup;
 mod popup_consts;
+mod restore_progress_view;
+// Re-export for use outside bottom_pane module (e.g., ChatWidget auto-fallback UI)
+pub(crate) use restore_progress_view::RestoreProgressView;
 mod scroll_state;
 mod selection_popup_common;
-pub(crate) mod sessions_popup;
 mod session_viewer;
-mod restore_progress_view;
+pub(crate) mod sessions_popup;
 mod status_indicator_view;
 mod textarea;
 
@@ -234,21 +236,7 @@ impl<'a> BottomPane<'a> {
         self.request_redraw();
     }
 
-    /// Update the status indicator text; creates the status view if needed.
-    pub(crate) fn update_status_text(&mut self, text: String) {
-        if !self.status_view_active {
-            let mut v = StatusIndicatorView::new(self.app_event_tx.clone());
-            v.update_text(text);
-            self.active_view = Some(Box::new(v));
-            self.status_view_active = true;
-        } else {
-            // Replace with a fresh view carrying the latest text.
-            let mut v = StatusIndicatorView::new(self.app_event_tx.clone());
-            v.update_text(text);
-            self.active_view = Some(Box::new(v));
-        }
-        self.request_redraw();
-    }
+    // Note: status indicator is activated via set_task_running(true) and internal flows.
 
     /// Called when the agent requests user approval.
     pub fn push_approval_request(&mut self, request: ApprovalRequest) {

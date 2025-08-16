@@ -25,7 +25,54 @@ This document explains how session restore works in the Rust TUI: what existed b
 
 ## What Changed and Why (External Behavior)
 
-This section explains the external changes, each with two lenses: the user convenience (a) and the technical necessity (b).
+This section summarises the externally visible behaviors introduced or refined.
+
+- Sessions list layout and scoping:
+  - Stats line moved to the top; actions moved to the bottom. The stats line reads “Showing X–Y of Z · [scope]”.
+  - The on‑disk file path is no longer shown. In “All sessions”, the recorded project root is shown (when present). In “This project”, sessions without a recorded project are excluded to keep the scope precise.
+  - Sessions with no visible user messages are hidden. Seed/system banners (e.g., initial AGENTS.md read, environment context) are ignored and do not create a visible session.
+  - Paging: up to 20 rows are shown to reduce scrolling overhead.
+  - Key hints include “S” (search) and “H” (help); key labels use the same background highlight as approval modals.
+
+- Session viewer layout and navigation:
+  - Long lines are wrapped to the terminal width. The X–Y / total numerator is computed from these wrapped rows.
+  - The header shows the numerator left‑aligned and the session file path right‑aligned (the path is truncated from the left with an ellipsis if space is insufficient).
+  - Standard navigation (↑/↓, PgUp/PgDn, Home/End) scrolls by wrapped rows; the numerator updates consistently with what is displayed.
+
+- Restore actions and flows:
+  - Action labels are “Restore”, “Exp. Restore”, “Server Restore” for clarity and consistency.
+  - When a server token is unavailable, the UI suggests running “Exp. Restore”. The plan summary (segments and ~tokens) показывается только при запуске “Exp. Restore”.
+  - “Exp. Restore” — автоматический: план выполняется целиком без подтверждений каждого сегмента. Для каждого сегмента отправляется преамбула и сразу Interrupt, чтобы модель не действовала на базе восстановленного содержимого. По завершении в историю вставляется полный реплей с тем же рендерером, что у Viewer/Server Restore.
+
+- Search and help:
+  - Sessions list: press “S” to open a search prompt in the footer; typing filters on what is displayed (label and, where shown, recorded root). Esc exits, Enter confirms. Matches are highlighted in the label.
+  - Session viewer: press “S” to open a search prompt in the footer; typing searches the displayed, wrapped lines. Enter jumps to the first match; “n”/“N” go to next/previous match. Matches are highlighted inline.
+  - Press “H” on either screen to print a brief, context‑specific help blurb (what is shown, key bindings, and a one‑liner on restore modes).
+
+### Internal Changes
+
+- Viewer wrapping and numerator:
+  - Wrapped rows are recomputed for the current width during render; the numerator and content viewport share the same wrapped rows and visible window height, ensuring consistent X–Y / total.
+  - The previous footer status line is removed; the numerator lives in the header alongside the right‑aligned file path.
+
+- Sessions list rendering and filtering:
+  - File paths are removed from the list; recorded root appears only in “All sessions”. “This project” excludes sessions with no recorded root.
+
+- Search implementation:
+  - List search filters by displayed fields (label and, when present, recorded root) and updates results live; Esc restores the original list. Matches are highlighted in the label.
+  - Viewer search operates over the displayed, wrapped lines; Enter jumps to the first match, “n”/“N” navigate subsequent/previous matches; matches are highlighted inline.
+
+- Server restore and experimental flow:
+  - When a server token is missing, the UI suggests running “Exp. Restore”. The plan summary (segments and ~tokens) появляется только при запуске “Exp. Restore”. Крупные истории аккуратно бьются на сегменты.
+  - Во время “Exp. Restore” сегменты не запускают активные действия модели: после каждого сегмента посылается Interrupt. По завершении — в историю вставляется полный реплей с тем же рендером, что в Session Viewer.
+
+### Help
+
+- Press “H” in the sessions list or in the viewer to print a short help blurb into the history: what the screen shows, the key bindings, and a one‑liner on restore modes.
+
+### Rationale for doing it here
+
+- These UX affordances are closest to the TUI’s bottom‑pane widgets and share the same highlight palette and key handling. Deferring them to a separate task would create avoidable divergence between list/viewer behaviors and raise the cost of future tweaks.
 
 - Unified action selector (in sessions list and viewer):
 
@@ -37,10 +84,10 @@ This section explains the external changes, each with two lenses: the user conve
   - a) User convenience: If a server resume token is present, we resume on the server; if not, the UI clearly falls back to local restore and explains why. Users no longer guess what “Resume (server)” will do.
   - b) Technical necessity: Providers only emit a reliable token at `response.completed`. Explicit gating prevents attempts to “resume” an already streaming turn (which can’t be continued) and avoids undefined server behavior.
 
-- Viewer shows only user/assistant messages with auto‑scroll:
+- Session Viewer: full replay with auto‑scroll:
 
-  - a) User convenience: The session viewer focuses on the conversation, bringing the most recent exchange into view without manual scrolling.
-  - b) Technical necessity: Filtering out low‑level items reduces rendering load and complexity, which is especially important in TTY environments with tight frame budgets.
+  - a) User convenience: The viewer brings the most recent exchange into view automatically, so you can resume without manual scrolling.
+  - b) Technical necessity: Rendering via the same building blocks as live history preserves formatting (colors, tool output, reasoning) for consistent fidelity during replay and restore.
 
 - Persisted metadata (model, version, last response id/token):
 
@@ -60,6 +107,10 @@ This section explains the external changes, each with two lenses: the user conve
 - CLI parity (modes and flags):
   - a) User convenience: Operators can trigger the same restore modes via flags or UI, depending on their workflow (keyboard‑driven vs. scripted).
   - b) Technical necessity: Feature parity keeps cross‑component assumptions intact, reduces drift between CLIs, and simplifies documentation/testing. Where flags differ, the help output is the source of truth.
+
+### Unified Server Restore path
+
+- Both the sessions list and the session viewer trigger the same Server Restore flow. After a successful restore, the active chat is fully re‑bound to the selected session: new turns append to the same JSONL and the restored transcript is used to hydrate context. This guarantees identical behavior regardless of where Server Restore was initiated.
 
 ## Internal Changes
 
@@ -227,6 +278,26 @@ Phrasing (TUI):
 - Appendix: Session Record Schema (Rust JSONL)
 - File layout:
   - Line 1: Header JSON (metadata). Required: `timestamp` (ISO 8601). Common optional fields: `id` (UUID), `instructions` (seed text), `git` (commit/branch/repository), `model`/`version` when available.
+  - Additional header fields persisted to aid restore parity: `reasoning_effort`, `reasoning_summary`, and `sandbox_policy` (all optional, recorded when known).
   - Subsequent lines: either `{"record_type":"state", ...}` entries (e.g., `provider_resume_token` when known) or response items (e.g., `message`, `function_call`, `function_call_output`, `reasoning`).
 - Contract:
   - Each line is an independent JSON object (append‑only). Unknown fields are ignored; missing fields are treated as absent. State lines may appear without a resume token; parsers should ignore state lines they don’t recognize.
+
+### CLI behavior on config drift
+
+- When restoring from a rollout file via CLI flags, if the current configuration (model, reasoning_effort, reasoning_summary, sandbox_policy) differs from what is recorded in the session header, the CLI exits with an error unless one of the following is specified:
+  - `--apply-session-settings`: apply the session settings from the header and continue.
+  - `--keep-current-config`: keep the current config and continue.
+
+This makes the CLI behavior explicit and avoids silently changing environment assumptions. Interactive TUI flows continue to present an in‑UI confirmation instead of exiting.
+
+### Persisted approvals and MCP availability
+
+- State records now include optional `approved_commands` (commands granted for the session). When a session is restored, these are loaded to match original behavior.
+- MCP tools availability at restore time may differ from recording time. The TUI emits a warning only if tools recorded as available are missing at restore; otherwise it remains silent.
+
+### Optional CLI auto‑fallback to Experimental Restore
+
+- When using `--resume-experimental` with `--auto-fallback-exp-restore`, if the provider/server resume token is missing or invalid, the TUI automatically prepares an Experimental Restore plan from the rollout file and opens the restore overlay. If the environment variable `CODEX_TUI_EXPERIMENTAL_RESTORE_SEND=1` is set, the plan is sent immediately instead of requiring a confirmation.
+
+## Appendix: Tests added

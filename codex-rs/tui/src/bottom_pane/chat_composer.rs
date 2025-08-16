@@ -647,6 +647,7 @@ impl WidgetRef for &ChatComposer {
             }
             ActivePopup::None => {
                 let bottom_line_rect = popup_rect;
+                // Subtle key hint style (composer keeps fg-only highlighting).
                 let key_hint_style = Style::default().fg(Color::Cyan);
                 let mut hint = if self.ctrl_c_quit_hint {
                     vec![

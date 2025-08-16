@@ -20,9 +20,11 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::config::Config;
+use crate::config_types::{ReasoningEffort, ReasoningSummary};
 use crate::git_info::GitInfo;
 use crate::git_info::collect_git_info;
 use crate::models::ResponseItem;
+use crate::protocol::SandboxPolicy;
 
 const SESSIONS_SUBDIR: &str = "sessions";
 
@@ -38,6 +40,15 @@ pub struct SessionMeta {
     /// Provider/server resume token (e.g., previous_response_id) if available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_resume_token: Option<String>,
+    /// Reasoning effort configured for the session (if available).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<ReasoningEffort>,
+    /// Reasoning summary policy configured for the session (if available).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_summary: Option<ReasoningSummary>,
+    /// Sandbox policy configured for the session (if available).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sandbox_policy: Option<SandboxPolicy>,
     /// Recorded project root at the time the session started.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recorded_project_root: Option<String>,
@@ -58,6 +69,15 @@ struct SessionMetaWithGit {
 pub struct SessionStateSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_resume_token: Option<String>,
+    /// Commands that have been approved for this session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approved_commands: Option<Vec<Vec<String>>>,
+    /// MCP tools that were available at recording time (fully-qualified names).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp_tools_at_recording: Option<Vec<String>>,
+    /// MCP tools missing at restore time compared to the recorded set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp_tools_missing_on_restore: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize, Default, Clone)]
@@ -87,7 +107,11 @@ pub(crate) struct RolloutRecorder {
 enum RolloutCmd {
     AddItems(Vec<ResponseItem>),
     UpdateState(SessionStateSnapshot),
-    Shutdown { ack: oneshot::Sender<()> },
+    /// Write a raw JSON value as a line (used for tool_event records).
+    WriteJson(serde_json::Value),
+    Shutdown {
+        ack: oneshot::Sender<()>,
+    },
 }
 
 impl RolloutRecorder {
@@ -152,6 +176,9 @@ impl RolloutRecorder {
                 model: Some(config.model.clone()),
                 version: Some(env!("CARGO_PKG_VERSION").to_string()),
                 provider_resume_token: None,
+                reasoning_effort: Some(config.model_reasoning_effort),
+                reasoning_summary: Some(config.model_reasoning_summary),
+                sandbox_policy: Some(config.sandbox_policy.clone()),
                 recorded_project_root: Some(recorded_root.display().to_string()),
                 recorded_cwd: Some(cwd.display().to_string()),
             }),
@@ -193,6 +220,16 @@ impl RolloutRecorder {
             .send(RolloutCmd::UpdateState(state))
             .await
             .map_err(|e| IoError::other(format!("failed to queue rollout state: {e}")))
+    }
+
+    /// Record a tool event line. This is an additive JSONL record that does not affect
+    /// legacy readers. The caller provides a fully-formed JSON value which will be written
+    /// as a single line.
+    pub(crate) async fn record_tool_event(&self, value: serde_json::Value) -> std::io::Result<()> {
+        self.tx
+            .send(RolloutCmd::WriteJson(value))
+            .await
+            .map_err(|e| IoError::other(format!("failed to queue rollout tool_event: {e}")))
     }
 
     pub async fn resume(
@@ -377,6 +414,10 @@ async fn rollout_writer(
                         state: &state,
                     })
                     .await?;
+            }
+            RolloutCmd::WriteJson(v) => {
+                // pass-through JSON value
+                writer.write_line(&v).await?;
             }
             RolloutCmd::Shutdown { ack } => {
                 let _ = ack.send(());

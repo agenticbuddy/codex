@@ -11,6 +11,7 @@ use crate::protocol::EventMsg;
 use crate::protocol::McpInvocation;
 use crate::protocol::McpToolCallBeginEvent;
 use crate::protocol::McpToolCallEndEvent;
+use serde_json::json;
 
 /// Handles the specified tool call dispatches the appropriate
 /// `McpToolCallBegin` and `McpToolCallEnd` events to the `Session`.
@@ -54,6 +55,23 @@ pub(crate) async fn handle_mcp_tool_call(
         invocation: invocation.clone(),
     });
     notify_mcp_tool_call_event(sess, sub_id, tool_call_begin_event).await;
+    // Also record tool_event (mcp begin)
+    let ts = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "".to_string());
+    let begin_value = json!({
+        "record_type": "tool_event",
+        "ts": ts,
+        "tool_kind": "mcp",
+        "phase": "begin",
+        "call_id": call_id.clone(),
+        "invocation": {
+            "server": server,
+            "tool": tool_name,
+            "arguments": arguments_value,
+        }
+    });
+    sess.record_tool_event_json(begin_value).await;
 
     let start = Instant::now();
     // Perform the tool call.
@@ -69,6 +87,26 @@ pub(crate) async fn handle_mcp_tool_call(
     });
 
     notify_mcp_tool_call_event(sess, sub_id, tool_call_end_event.clone()).await;
+    // Record tool_event (mcp end)
+    let ts = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "".to_string());
+    let success = match &result {
+        Ok(res) => !res.is_error.unwrap_or(false),
+        Err(_) => false,
+    };
+    let duration_ms = start.elapsed().as_millis() as u64;
+    let end_value = json!({
+        "record_type": "tool_event",
+        "ts": ts,
+        "tool_kind": "mcp",
+        "phase": "end",
+        "call_id": call_id,
+        "duration_ms": duration_ms,
+        "success": success,
+        "result": result,
+    });
+    sess.record_tool_event_json(end_value).await;
 
     ResponseInputItem::McpToolCallOutput { call_id, result }
 }

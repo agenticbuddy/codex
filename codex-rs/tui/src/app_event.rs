@@ -2,6 +2,7 @@ use codex_core::protocol::Event;
 use codex_file_search::FileMatch;
 use crossterm::event::KeyEvent;
 use ratatui::text::Line;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::app::ChatWidgetArgs;
@@ -59,7 +60,18 @@ pub(crate) enum AppEvent {
 
     /// Restore overlay finished; carry approx token estimate and segments
     /// so the chat layer can report provider usage on the next turn.
-    RestoreCompleted { approx_tokens: usize, segments: usize },
+    RestoreCompleted {
+        approx_tokens: usize,
+        segments: usize,
+    },
+
+    /// Relaunch chat bound to an existing rollout file and optional provider token.
+    /// Used by Server Restore to fully switch to the selected session so further
+    /// history is written into it (and context is hydrated from it).
+    RelaunchWithResume {
+        path: PathBuf,
+        provider_token: Option<String>,
+    },
 
     /// Onboarding: result of login_with_chatgpt.
     OnboardingAuthComplete(Result<(), String>),

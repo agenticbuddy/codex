@@ -105,7 +105,15 @@ async fn helpers_are_available_and_do_not_panic() {
     let tx = AppEventSender::new(tx_raw);
     let cfg = test_config();
     let conversation_manager = Arc::new(ConversationManager::default());
-    let mut w = ChatWidget::new(cfg, conversation_manager, tx, None, Vec::new(), false);
+    let mut w = ChatWidget::new(
+        cfg,
+        conversation_manager,
+        tx,
+        None,
+        Vec::new(),
+        false,
+        false,
+    );
     // Basic construction sanity.
     let _ = &mut w;
 }
@@ -142,6 +150,8 @@ fn make_chatwidget_manual() -> (
         interrupts: InterruptManager::new(),
         needs_redraw: false,
         session_id: None,
+        pending_restore_estimate: None,
+        auto_fallback_exp_restore: false,
     };
     (widget, rx, op_rx)
 }
@@ -191,6 +201,69 @@ fn open_fixture(name: &str) -> std::fs::File {
     }
     // 3) Last resort: CWD
     File::open(name).expect("open fixture file")
+}
+
+#[test]
+fn auto_fallback_exp_restore_triggers_on_missing_token_background_event() {
+    let (mut chat, rx, _op_rx) = make_chatwidget_manual();
+    // Enable auto fallback
+    chat.auto_fallback_exp_restore = true;
+
+    // Create a minimal rollout file with header + one user message so token estimation > 0
+    let dir = std::env::temp_dir();
+    let path = dir.join(format!("rollout-{}.jsonl", uuid::Uuid::new_v4()));
+    let header = serde_json::json!({ "timestamp": "2025-01-01T00:00:00Z" }).to_string();
+    let msg = serde_json::json!({
+        "type": "message",
+        "role": "user",
+        "content": [{"text": "hello"}]
+    })
+    .to_string();
+    std::fs::write(&path, format!("{}\n{}\n", header, msg)).expect("write rollout");
+
+    // Point the widget to this rollout
+    chat.config.experimental_resume = Some(path);
+
+    // Simulate background event that indicates missing token
+    chat.on_background_event("resume_token_missing".into());
+
+    // Expect an Experimental restore plan announcement in history
+    let cells = drain_insert_history(&rx);
+    let blob = lines_to_single_string(&cells.concat());
+    assert!(
+        blob.contains("Experimental restore"),
+        "plan header not shown"
+    );
+    assert!(blob.contains("Plan:"), "plan line not shown");
+}
+
+#[test]
+fn auto_fallback_exp_restore_triggers_on_token_error() {
+    let (mut chat, rx, _op_rx) = make_chatwidget_manual();
+    chat.auto_fallback_exp_restore = true;
+
+    // Create rollout with at least one item so we can estimate
+    let dir = std::env::temp_dir();
+    let path = dir.join(format!("rollout-{}.jsonl", uuid::Uuid::new_v4()));
+    let header = serde_json::json!({ "timestamp": "2025-01-01T00:00:00Z" }).to_string();
+    let msg = serde_json::json!({
+        "type": "message",
+        "role": "user",
+        "content": [{"text": "hello"}]
+    })
+    .to_string();
+    std::fs::write(&path, format!("{}\n{}\n", header, msg)).expect("write rollout");
+    chat.config.experimental_resume = Some(path);
+
+    // Simulate an error message representative of failed server resume
+    chat.on_error("response.failed: previous_response_not_found".into());
+
+    let cells = drain_insert_history(&rx);
+    let blob = lines_to_single_string(&cells.concat());
+    assert!(
+        blob.contains("Experimental restore"),
+        "plan header not shown"
+    );
 }
 
 #[test]

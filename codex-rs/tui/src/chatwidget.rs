@@ -32,6 +32,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Constraint;
 use ratatui::layout::Layout;
 use ratatui::layout::Rect;
+use ratatui::style::Stylize;
 use ratatui::widgets::Widget;
 use ratatui::widgets::WidgetRef;
 use tokio::sync::mpsc::UnboundedSender;
@@ -89,6 +90,7 @@ pub(crate) struct ChatWidget<'a> {
     session_id: Option<Uuid>,
     // Post-restore estimate to be surfaced on the next TokenCount.
     pending_restore_estimate: Option<(usize, usize)>,
+    auto_fallback_exp_restore: bool,
 }
 
 struct UserMessage {
@@ -129,7 +131,15 @@ impl ChatWidget<'_> {
         self.bottom_pane
             .set_history_metadata(event.history_log_id, event.history_entry_count);
         self.session_id = Some(event.session_id);
-        self.add_to_history(&history_cell::new_session_info(&self.config, event, true));
+        // Suppress the introductory banner when resuming from a saved rollout
+        // (experimental/server restore). The viewer already inserted the
+        // restored transcript, so printing the starter blurb would be noisy.
+        let is_first_event = self.config.experimental_resume.is_none();
+        self.add_to_history(&history_cell::new_session_info(
+            &self.config,
+            event,
+            is_first_event,
+        ));
         if let Some(user_message) = self.initial_user_message.take() {
             self.submit_user_message(user_message);
         }
@@ -201,21 +211,30 @@ impl ChatWidget<'_> {
         // If a restore just completed, surface a concise usage summary once.
         if let Some((approx_tokens, segments)) = self.pending_restore_estimate.take() {
             use ratatui::text::Line as RLine;
-            self.app_event_tx.send(AppEvent::InsertHistory(vec![
-                RLine::from(format!(
+            self.app_event_tx
+                .send(AppEvent::InsertHistory(vec![RLine::from(format!(
                     "Restore summary: {} segments (~{} tokens).",
                     segments, approx_tokens
-                )),
-            ]));
+                ))]));
         }
     }
 
     fn on_error(&mut self, message: String) {
-        self.add_to_history(&history_cell::new_error_event(message));
+        self.add_to_history(&history_cell::new_error_event(message.clone()));
         self.bottom_pane.set_task_running(false);
         self.running_commands.clear();
         self.stream.clear_all();
         self.mark_needs_redraw();
+        // Auto fallback to experimental restore if server resume token fails mid-turn.
+        let msg = message.to_lowercase();
+        if self.auto_fallback_exp_restore
+            && (msg.contains("previous_response_not_found")
+                || msg.contains("resume token")
+                || msg.contains("response.failed")
+                || msg.contains("invalid resume"))
+        {
+            self.maybe_auto_start_exp_restore();
+        }
     }
 
     fn on_plan_update(&mut self, update: codex_core::plan_tool::UpdatePlanArgs) {
@@ -308,7 +327,7 @@ impl ChatWidget<'_> {
 
     fn on_background_event(&mut self, message: String) {
         debug!("BackgroundEvent: {message}");
-        // Surface resume handshake status as a subtle history line.
+        // Surface resume handshake status and selected restore diagnostics as subtle history lines.
         use ratatui::style::Stylize;
         match message.as_str() {
             "resume_token_confirmed" => {
@@ -323,8 +342,81 @@ impl ChatWidget<'_> {
                     )
                     .gray(),
                 ]));
+                if self.auto_fallback_exp_restore {
+                    self.maybe_auto_start_exp_restore();
+                }
             }
-            _ => {}
+            _ => {
+                if let Some(rest) = message.strip_prefix("mcp_tools_missing:") {
+                    let mut parts = rest.splitn(2, ' ');
+                    let count = parts.next().unwrap_or("");
+                    let names = parts.next().unwrap_or("");
+                    let line = if names.is_empty() {
+                        format!(
+                            "Some MCP tools recorded in the session are missing ({}).",
+                            count
+                        )
+                    } else {
+                        format!(
+                            "Some MCP tools recorded in the session are missing ({}): {}",
+                            count, names
+                        )
+                    };
+                    self.app_event_tx.send(AppEvent::InsertHistory(vec![
+                        ratatui::text::Line::from(line).gray(),
+                    ]));
+                }
+            }
+        }
+    }
+
+    fn maybe_auto_start_exp_restore(&mut self) {
+        if !self.auto_fallback_exp_restore {
+            return;
+        }
+        if let Some(path) = self.config.experimental_resume.as_ref() {
+            if let Ok(txt) = std::fs::read_to_string(path) {
+                let mut items_json: Vec<serde_json::Value> = Vec::new();
+                for line in txt.lines().skip(1) {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                        items_json.push(v);
+                    }
+                }
+                let response_items =
+                    crate::experimental_restore::filter_response_items(&items_json);
+                if response_items.is_empty() {
+                    return;
+                }
+                let chunks =
+                    crate::experimental_restore::segment_items_by_tokens(&response_items, 2000);
+                let total_tokens = crate::experimental_restore::approximate_tokens(&response_items);
+                let blurb = "Experimental restore: attempting to restore prior conversation history automatically (server resume unavailable).";
+                self.app_event_tx.send(AppEvent::InsertHistory(vec![
+                    ratatui::text::Line::from("Experimental restore").magenta(),
+                    ratatui::text::Line::from(blurb.to_string()),
+                    ratatui::text::Line::from(format!(
+                        "Plan: {} segments (~{} tokens).",
+                        chunks.len(),
+                        total_tokens
+                    )),
+                    ratatui::text::Line::from(""),
+                ]));
+                let view = if std::env::var("CODEX_TUI_EXPERIMENTAL_RESTORE_SEND")
+                    .ok()
+                    .as_deref()
+                    == Some("1")
+                {
+                    crate::bottom_pane::RestoreProgressView::from_plan(
+                        response_items,
+                        chunks,
+                        total_tokens,
+                    )
+                } else {
+                    crate::bottom_pane::RestoreProgressView::new(chunks.len())
+                };
+                self.bottom_pane.show_view(Box::new(view));
+                self.mark_needs_redraw();
+            }
         }
     }
     /// Periodic tick to commit at most one queued line to history with a small delay,
@@ -523,6 +615,7 @@ impl ChatWidget<'_> {
         initial_prompt: Option<String>,
         initial_images: Vec<PathBuf>,
         enhanced_keys_supported: bool,
+        auto_fallback_exp_restore: bool,
     ) -> Self {
         let codex_op_tx = spawn_agent(config.clone(), app_event_tx.clone(), conversation_manager);
 
@@ -551,6 +644,7 @@ impl ChatWidget<'_> {
             needs_redraw: false,
             session_id: None,
             pending_restore_estimate: None,
+            auto_fallback_exp_restore,
         }
     }
 
@@ -708,10 +802,9 @@ impl ChatWidget<'_> {
 
     pub(crate) fn open_sessions_popup(&mut self) {
         let codex_home = self.config.codex_home.clone();
-        self.bottom_pane
-            .show_view(Box::new(crate::bottom_pane::sessions_popup::SessionsPopup::new(
-                codex_home,
-            )));
+        self.bottom_pane.show_view(Box::new(
+            crate::bottom_pane::sessions_popup::SessionsPopup::new(codex_home),
+        ));
     }
 
     /// Forward file-search results to the bottom pane.

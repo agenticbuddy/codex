@@ -14,7 +14,7 @@ pub(crate) fn append_markdown(
     append_markdown_with_opener_and_cwd(markdown_source, lines, config.file_opener, &config.cwd);
 }
 
-fn append_markdown_with_opener_and_cwd(
+pub(crate) fn append_markdown_with_opener_and_cwd(
     markdown_source: &str,
     lines: &mut Vec<Line<'static>>,
     file_opener: UriBasedFileOpener,

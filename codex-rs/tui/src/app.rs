@@ -70,6 +70,10 @@ pub(crate) struct App<'a> {
     /// Channel to schedule one-shot animation frames; coalesced by a single
     /// scheduler thread.
     frame_schedule_tx: std::sync::mpsc::Sender<Instant>,
+
+    /// When true, automatically falls back to experimental restore if the
+    /// server resume token is missing/invalid.
+    auto_fallback_exp_restore: bool,
 }
 
 /// Aggregate parameters needed to create a `ChatWidget`, as creation may be
@@ -88,6 +92,7 @@ impl App<'_> {
         initial_prompt: Option<String>,
         initial_images: Vec<std::path::PathBuf>,
         show_trust_screen: bool,
+        auto_fallback_exp_restore: bool,
     ) -> Self {
         let conversation_manager = Arc::new(ConversationManager::default());
 
@@ -138,6 +143,7 @@ impl App<'_> {
         }
 
         let show_login_screen = should_show_login_screen(&config);
+        let auto_fallback_exp_restore = auto_fallback_exp_restore;
         let app_state = if show_login_screen || show_trust_screen {
             let chat_widget_args = ChatWidgetArgs {
                 config: config.clone(),
@@ -163,6 +169,7 @@ impl App<'_> {
                 initial_prompt,
                 initial_images,
                 enhanced_keys_supported,
+                auto_fallback_exp_restore,
             );
             AppState::Chat {
                 widget: Box::new(chat_widget),
@@ -222,6 +229,7 @@ impl App<'_> {
             enhanced_keys_supported,
             commit_anim_running: Arc::new(AtomicBool::new(false)),
             frame_schedule_tx: frame_tx,
+            auto_fallback_exp_restore,
         }
     }
 
@@ -272,7 +280,10 @@ impl App<'_> {
                         widget.on_commit_tick();
                     }
                 }
-                AppEvent::RestoreCompleted { approx_tokens, segments } => {
+                AppEvent::RestoreCompleted {
+                    approx_tokens,
+                    segments,
+                } => {
                     if let AppState::Chat { widget } = &mut self.app_state {
                         widget.on_restore_completed(approx_tokens, segments);
                     }
@@ -360,6 +371,7 @@ impl App<'_> {
                             None,
                             Vec::new(),
                             self.enhanced_keys_supported,
+                            self.auto_fallback_exp_restore,
                         ));
                         self.app_state = AppState::Chat { widget: new_widget };
                         self.app_event_tx.send(AppEvent::RequestRedraw);
@@ -487,6 +499,7 @@ impl App<'_> {
                             initial_prompt,
                             initial_images,
                             enhanced_keys_supported,
+                            self.auto_fallback_exp_restore,
                         )),
                     }
                 }
@@ -499,6 +512,30 @@ impl App<'_> {
                     if let AppState::Chat { widget } = &mut self.app_state {
                         widget.apply_file_search_result(query, matches);
                     }
+                }
+                AppEvent::RelaunchWithResume {
+                    path,
+                    provider_token,
+                } => {
+                    // Recreate ChatWidget bound to the requested rollout file and token.
+                    let mut new_cfg = self.config.clone();
+                    new_cfg.experimental_resume = Some(path);
+                    new_cfg.provider_resume_token = provider_token;
+
+                    let new_widget = Box::new(ChatWidget::new(
+                        new_cfg.clone(),
+                        self.server.clone(),
+                        self.app_event_tx.clone(),
+                        None,
+                        Vec::new(),
+                        self.enhanced_keys_supported,
+                        self.auto_fallback_exp_restore,
+                    ));
+
+                    // Swap app state and remember new config for future spawns.
+                    self.config = new_cfg;
+                    self.app_state = AppState::Chat { widget: new_widget };
+                    self.app_event_tx.send(AppEvent::RequestRedraw);
                 }
             }
         }
