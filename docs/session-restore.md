@@ -33,16 +33,18 @@ This section summarises the externally visible behaviors introduced or refined.
   - Sessions with no visible user messages are hidden. Seed/system banners (e.g., initial AGENTS.md read, environment context) are ignored and do not create a visible session.
   - Paging: up to 20 rows are shown to reduce scrolling overhead.
   - Key hints include “S” (search) and “H” (help); key labels use the same background highlight as approval modals.
+  - Actions footer shows: “View”, “Restore”, “Exp. Restore”, “Server Restore”. “View” opens a read‑only viewer; other actions operate on the selected session.
 
 - Session viewer layout and navigation:
   - Long lines are wrapped to the terminal width. The X–Y / total numerator is computed from these wrapped rows.
   - The header shows the numerator left‑aligned and the session file path right‑aligned (the path is truncated from the left with an ellipsis if space is insufficient).
   - Standard navigation (↑/↓, PgUp/PgDn, Home/End) scrolls by wrapped rows; the numerator updates consistently with what is displayed.
+  - Actions footer shows: “Return”, “Restore”, “Exp. Restore”, “Server Restore”. “Return” возвращает назад к списку сессий.
 
 - Restore actions and flows:
-  - Action labels are “Restore”, “Exp. Restore”, “Server Restore” for clarity and consistency.
+  - Action labels are unified across entry points: in the sessions list — “View / Restore / Exp. Restore / Server Restore”, in the session viewer — “Return / Restore / Exp. Restore / Server Restore”.
   - When a server token is unavailable, the UI suggests running “Exp. Restore”. The plan summary (segments and ~tokens) показывается только при запуске “Exp. Restore”.
-  - “Exp. Restore” — автоматический: план выполняется целиком без подтверждений каждого сегмента. Для каждого сегмента отправляется преамбула и сразу Interrupt, чтобы модель не действовала на базе восстановленного содержимого. По завершении в историю вставляется полный реплей с тем же рендерером, что у Viewer/Server Restore.
+  - “Exp. Restore” — автоматический: после подтверждения из списка или из просмотрщика восстановление запускается и выполняется целиком без ручных подтверждений каждого сегмента. Для каждого сегмента отправляется преамбула и сразу Interrupt, чтобы модель не действовала на базе восстановленного содержимого. Во время выполнения показывается оверлей с прогресс‑баром “Restoring: [#####…..] NN%”, который обновляется по мере отправки чанков. По завершении в историю вставляется полный реплей с тем же рендерером, что у Viewer/Server Restore.
 
 - Search and help:
   - Sessions list: press “S” to open a search prompt in the footer; typing filters on what is displayed (label and, where shown, recorded root). Esc exits, Enter confirms. Matches are highlighted in the label.
@@ -57,6 +59,7 @@ This section summarises the externally visible behaviors introduced or refined.
 
 - Sessions list rendering and filtering:
   - File paths are removed from the list; recorded root appears only in “All sessions”. “This project” excludes sessions with no recorded root.
+  - В режиме “All sessions” для сессий без `recorded_project_root` явно показывается “root: Unknown”.
 
 - Search implementation:
   - List search filters by displayed fields (label and, when present, recorded root) and updates results live; Esc restores the original list. Matches are highlighted in the label.

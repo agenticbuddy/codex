@@ -401,20 +401,31 @@ impl ChatWidget<'_> {
                     )),
                     ratatui::text::Line::from(""),
                 ]));
-                let view = if std::env::var("CODEX_TUI_EXPERIMENTAL_RESTORE_SEND")
+                let auto_send = std::env::var("CODEX_TUI_EXPERIMENTAL_RESTORE_SEND")
                     .ok()
                     .as_deref()
-                    == Some("1")
-                {
+                    == Some("1");
+                let view = if auto_send {
                     crate::bottom_pane::RestoreProgressView::from_plan(
-                        response_items,
-                        chunks,
+                        response_items.clone(),
+                        chunks.clone(),
                         total_tokens,
                     )
                 } else {
                     crate::bottom_pane::RestoreProgressView::new(chunks.len())
                 };
                 self.bottom_pane.show_view(Box::new(view));
+                // If auto-send is enabled, simulate Enter presses to drive the overlay
+                // and show a live progress bar without further confirmations.
+                if auto_send {
+                    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+                    for _ in 0..chunks.len() {
+                        self.app_event_tx.send(AppEvent::KeyEvent(KeyEvent::new(
+                            KeyCode::Enter,
+                            KeyModifiers::NONE,
+                        )));
+                    }
+                }
                 self.mark_needs_redraw();
             }
         }

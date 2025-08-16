@@ -319,8 +319,8 @@ impl SessionsPopup {
                         pane.show_view(Box::new(viewer));
                     }
                     1 => {
-                        // Restore (local): pre-insert the rendered transcript for parity
-                        // with the Session Viewer, then prefill the composer prompt.
+                        // Restore (local): pre-insert the full rendered transcript for parity
+                        // with the Session Viewer/Server Restore, then prefill the composer prompt.
                         if let Ok(txt) = std::fs::read_to_string(&meta.path) {
                             // Collect JSON items (skip header)
                             let mut items: Vec<serde_json::Value> = Vec::new();
@@ -329,14 +329,8 @@ impl SessionsPopup {
                                     items.push(v);
                                 }
                             }
-                            // Render only user/assistant messages with markdown styling,
-                            // matching the default view mode used by the Session Viewer.
-                            let base_lines =
-                                crate::transcript::render_user_assistant_markdown_lines(&items);
-                            let to_insert: Vec<ratatui::text::Line<'static>> = base_lines
-                                .into_iter()
-                                .map(|s| ratatui::text::Line::from(s))
-                                .collect();
+                            // Render full replay with the same renderer as Viewer/Server Restore.
+                            let to_insert = crate::transcript::render_replay_lines(&items);
                             if !to_insert.is_empty() {
                                 pane.app_event_tx.send(AppEvent::InsertHistory(to_insert));
                             }
@@ -378,15 +372,15 @@ impl SessionsPopup {
                                 total_tokens,
                             );
                             pane.show_view(Box::new(view));
-                            // Auto-progress all segments without requiring Enter presses.
+                            // Auto-progress all segments once confirmed by the user.
+                            // Simulate Enter presses so the overlay can stream progress updates.
                             use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
                             for _ in 0..chunks.len() {
                                 pane.app_event_tx.send(crate::app_event::AppEvent::KeyEvent(
                                     KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
                                 ));
                             }
-                            // Mark this popup complete so the overlay remains active
-                            // and receives key events.
+                            // Mark this popup complete so the overlay remains active and receives key events.
                             self.complete = true;
                         } else {
                             pane.app_event_tx.send(AppEvent::InsertHistory(vec![
@@ -515,8 +509,11 @@ impl<'a> BottomPaneView<'a> for SessionsPopup {
         // Non-search key handling
         if matches!(key_event.code, KeyCode::Char('h') | KeyCode::Char('H')) {
             pane.app_event_tx.send(AppEvent::InsertHistory(vec![
-                ratatui::text::Line::from("Sessions List: View/Restore/Exp.Restore/Server Restore."),
+                ratatui::text::Line::from("Sessions List: View / Restore / Exp. Restore / Server Restore"),
                 ratatui::text::Line::from("←/→ switch · ↑/↓ navigate · PgUp/PgDn fast · Enter select · Esc/Ctrl+C close · A toggle scope · S search · H help"),
+                ratatui::text::Line::from("Restore inserts a full replay into history, then pre-fills the composer."),
+                ratatui::text::Line::from("Exp. Restore runs automatically with a live progress bar; each segment sends and is interrupted to prevent actions."),
+                ratatui::text::Line::from("Server Restore behavior is consistent from list or viewer; when a token is missing, a clear fallback is offered."),
                 ratatui::text::Line::from("Note: empty sessions are hidden; seed entries (<user_instructions>, <environment_context>) are ignored."),
                 ratatui::text::Line::from("")
             ]));
@@ -590,8 +587,9 @@ impl<'a> BottomPaneView<'a> for SessionsPopup {
                 pane.app_event_tx.send(AppEvent::InsertHistory(vec![
                     ratatui::text::Line::from("Sessions: View / Restore / Exp. Restore / Server Restore"),
                     ratatui::text::Line::from("Use ←/→ to choose an action; ↑/↓ to navigate; PgUp/PgDn to page; A toggles scope (This project/All); S opens inline search; H shows this help."),
-                    ratatui::text::Line::from("Restore continues locally from the rollout file (appends to the same JSONL). Server Restore resumes using a stored provider token when available; otherwise a clear fallback is offered."),
-                    ratatui::text::Line::from("Exp. Restore previews a segmented plan (~tokens) and requires confirmation before sending; approvals are blocked until completion."),
+                    ratatui::text::Line::from("Restore inserts a full replay into history and continues locally (appends to the same JSONL)."),
+                    ratatui::text::Line::from("Exp. Restore runs automatically with a live progress bar; each segment is interrupted to prevent actions while restoring."),
+                    ratatui::text::Line::from("Server Restore resumes with a stored provider token when available; otherwise a clear fallback is offered. Behavior is the same from list or viewer."),
                     ratatui::text::Line::from("Only sessions with visible user messages are listed; seed/system entries (e.g., initial instructions/environment) are hidden."),
                     ratatui::text::Line::from("")
                 ]));
@@ -731,9 +729,13 @@ impl<'a> BottomPaneView<'a> for SessionsPopup {
             .map(|m| {
                 // hide file path; for All sessions show recorded root if present
                 let desc = if self.show_all {
-                    m.recorded_project_root
-                        .as_ref()
-                        .map(|root| format!("root: {}", root))
+                    Some(format!(
+                        "root: {}",
+                        m.recorded_project_root
+                            .as_deref()
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or("Unknown")
+                    ))
                 } else {
                     None
                 };

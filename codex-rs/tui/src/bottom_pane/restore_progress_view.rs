@@ -245,15 +245,33 @@ impl<'a> BottomPaneView<'a> for RestoreProgressView {
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer) {
-        // Do not auto-progress. Require explicit Enter to begin/advance.
-        let label = if self.canceled.get() {
-            "Restore cancelled"
-        } else if self.percent.get() == 0 && !self.complete.get() {
-            "Experimental restore ready — Enter to start; Esc cancels."
-        } else {
-            "Restoring… (Enter next, Esc cancel)"
-        };
-        ratatui::text::Line::from(label).render_ref(area, buf);
+        use ratatui::text::Line;
+        use unicode_width::UnicodeWidthStr;
+        if self.canceled.get() {
+            Line::from("Restore cancelled").render_ref(area, buf);
+            return;
+        }
+        if self.percent.get() == 0 && !self.complete.get() {
+            Line::from("Experimental restore ready — Enter to start; Esc cancels.")
+                .render_ref(area, buf);
+            return;
+        }
+        // Progress bar
+        let pct = self.percent.get().min(100);
+        let label = format!("Restoring: {:>3}%", pct);
+        // Compute bar width based on available space
+        let total_w = area.width as usize;
+        let label_w = label.width();
+        let bracket_w = 2; // [ ]
+        let min_bar = 10usize;
+        let bar_w = total_w
+            .saturating_sub(label_w + 1) // space between label and bar
+            .max(min_bar);
+        let fill_w = ((bar_w.saturating_sub(bracket_w)) * pct as usize) / 100;
+        let empty_w = bar_w.saturating_sub(bracket_w + fill_w);
+        let bar = format!("[{}{}]", "#".repeat(fill_w), "-".repeat(empty_w));
+        let line = format!("{} {}", label, bar);
+        Line::from(line).render_ref(area, buf);
     }
 }
 

@@ -322,8 +322,9 @@ impl<'a> BottomPaneView<'a> for SessionViewer {
                     ratatui::text::Line::from("Session Viewer: Return / Restore / Exp. Restore / Server Restore"),
                     ratatui::text::Line::from("Use ←/→ to choose an action; ↑/↓/PgUp/PgDn to scroll; Home/End to jump; S starts search; H shows this help."),
                     ratatui::text::Line::from("Long lines wrap to fit the terminal width; the header shows the visible range and the right-aligned file path (truncated from the left if needed)."),
-                    ratatui::text::Line::from("The viewer shows a full replay of the saved session with formatting and tool output."),
-                    ratatui::text::Line::from("Server Restore resumes using a stored provider token when present; if unavailable or invalid, you’ll be guided to run an Experimental Restore plan."),
+                    ratatui::text::Line::from("Restore inserts a full replay into history, then pre-fills the composer."),
+                    ratatui::text::Line::from("Exp. Restore runs automatically with a live progress bar; each segment sends and is interrupted to prevent actions."),
+                    ratatui::text::Line::from("Server Restore behavior is the same from list or viewer; if a token is unavailable or invalid, you’ll be guided to Experimental Restore."),
                     ratatui::text::Line::from("")
                 ]));
             }
