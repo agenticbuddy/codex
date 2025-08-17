@@ -5,13 +5,15 @@ use serde_json::Value;
 pub(crate) fn filter_response_items(items: &[Value]) -> Vec<Value> {
     items
         .iter()
-        .filter(|v| match v.get("type").and_then(|t| t.as_str()) {
-            Some("message")
-            | Some("reasoning")
-            | Some("function_call")
-            | Some("function_call_output")
-            | Some("local_shell_call") => true,
-            _ => false,
+        .filter(|v| {
+            matches!(
+                v.get("type").and_then(|t| t.as_str()),
+                Some("message")
+                    | Some("reasoning")
+                    | Some("function_call")
+                    | Some("function_call_output")
+                    | Some("local_shell_call")
+            )
         })
         .cloned()
         .collect()
@@ -53,7 +55,7 @@ pub(crate) fn approximate_tokens(items: &[Value]) -> usize {
             _ => {}
         }
     }
-    (chars + 3) / 4
+    chars.div_ceil(4)
 }
 
 /// Greedy segmentation of items by approximate token threshold.

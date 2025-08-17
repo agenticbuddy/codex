@@ -1341,6 +1341,112 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                         .await;
                 }
             }
+            Op::ImportApprovedCommands { commands } => {
+                // Seed approved commands into the current session and persist state.
+                for cmd in &commands {
+                    sess.add_approved_command(cmd.clone());
+                }
+                // Persist snapshot of approvals so future resumes see them.
+                let rec_opt = {
+                    let guard = sess.rollout.lock().unwrap();
+                    guard.as_ref().cloned()
+                };
+                if let Some(rec) = rec_opt {
+                    let _ = rec
+                        .record_state(crate::rollout::SessionStateSnapshot {
+                            provider_resume_token: None,
+                            approved_commands: Some(commands.clone()),
+                            mcp_tools_at_recording: None,
+                            mcp_tools_missing_on_restore: None,
+                        })
+                        .await;
+                }
+            }
+            Op::SetReplayReferenceMeta {
+                session_meta,
+                mcp_tools_at_recording,
+            } => {
+                // Compute MCP tools diff if recording is provided.
+                if let Some(rec_tools) = mcp_tools_at_recording {
+                    let rec_set: std::collections::HashSet<_> = rec_tools.iter().cloned().collect();
+                    let cur_set: std::collections::HashSet<_> = sess
+                        .mcp_connection_manager
+                        .list_all_tools()
+                        .keys()
+                        .cloned()
+                        .collect();
+                    let missing: Vec<String> = rec_set.difference(&cur_set).cloned().collect();
+                    if !missing.is_empty() {
+                        // Persist as a state snapshot and notify background event.
+                        let rec_opt = {
+                            let guard = sess.rollout.lock().unwrap();
+                            guard.as_ref().cloned()
+                        };
+                        if let Some(rec) = rec_opt {
+                            let _ = rec
+                                .record_state(crate::rollout::SessionStateSnapshot {
+                                    provider_resume_token: None,
+                                    approved_commands: None,
+                                    mcp_tools_at_recording: None,
+                                    mcp_tools_missing_on_restore: Some(missing.clone()),
+                                })
+                                .await;
+                        }
+                        sess.notify_background_event(
+                            &sub.id,
+                            format!("mcp_tools_missing:{} {}", missing.len(), missing.join(", ")),
+                        )
+                        .await;
+                    }
+                }
+
+                // Compute settings_changed from header meta vs current config and defer
+                // writing it until the first user input of this session.
+                let mut from = serde_json::Map::new();
+                let mut to = serde_json::Map::new();
+                if let Some(m) = session_meta.get("model").cloned() {
+                    from.insert("model".into(), m);
+                    to.insert(
+                        "model".into(),
+                        serde_json::Value::String(config.model.clone()),
+                    );
+                }
+                if let Some(eff) = session_meta.get("reasoning_effort").cloned() {
+                    from.insert("reasoning_effort".into(), eff);
+                    to.insert(
+                        "reasoning_effort".into(),
+                        serde_json::to_value(config.model_reasoning_effort)
+                            .unwrap_or(serde_json::Value::Null),
+                    );
+                }
+                if let Some(sum) = session_meta.get("reasoning_summary").cloned() {
+                    from.insert("reasoning_summary".into(), sum);
+                    to.insert(
+                        "reasoning_summary".into(),
+                        serde_json::to_value(config.model_reasoning_summary)
+                            .unwrap_or(serde_json::Value::Null),
+                    );
+                }
+                if let Some(sb) = session_meta.get("sandbox_policy").cloned() {
+                    from.insert("sandbox_policy".into(), sb);
+                    to.insert(
+                        "sandbox_policy".into(),
+                        serde_json::to_value(&config.sandbox_policy)
+                            .unwrap_or(serde_json::Value::Null),
+                    );
+                }
+                if from != to {
+                    let v = serde_json::json!({
+                        "record_type": "state",
+                        "settings_changed": {
+                            "from": from,
+                            "to": to
+                        }
+                    });
+                    let mut st = sess.state.lock().unwrap();
+                    st.pending_settings_changed = Some(v);
+                }
+            }
         }
     }
     debug!("Agent loop exited");

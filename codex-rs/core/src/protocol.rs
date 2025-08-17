@@ -88,6 +88,20 @@ pub enum Op {
     /// Optional handshake to validate readiness to resume using the current provider resume token.
     /// This should not modify conversation state or transcript.
     HandshakeResume,
+
+    /// Import a set of pre-approved commands into the current session.
+    /// Used by Replay to carry approvals from an old rollout into a fresh session.
+    ImportApprovedCommands { commands: Vec<Vec<String>> },
+
+    /// Provide reference metadata for a Replay run so the core can compute
+    /// diagnostics (e.g., settings_changed) and MCP tool diffs against the
+    /// current environment.
+    SetReplayReferenceMeta {
+        /// The original session header JSON (first line of the JSONL).
+        session_meta: serde_json::Value,
+        /// The list of MCP tools recorded in the original session, if known.
+        mcp_tools_at_recording: Option<Vec<String>>,
+    },
 }
 
 /// Determines the conditions under which the user is consulted to approve

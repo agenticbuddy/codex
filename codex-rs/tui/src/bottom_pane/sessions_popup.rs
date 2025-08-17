@@ -319,29 +319,38 @@ impl SessionsPopup {
                         pane.show_view(Box::new(viewer));
                     }
                     1 => {
-                        // Restore (local): pre-insert the full rendered transcript for parity
-                        // with the Session Viewer/Server Restore, then prefill the composer prompt.
-                        if let Ok(txt) = std::fs::read_to_string(&meta.path) {
-                            // Collect JSON items (skip header)
-                            let mut items: Vec<serde_json::Value> = Vec::new();
-                            for line in txt.lines().skip(1) {
-                                if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-                                    items.push(v);
-                                }
-                            }
-                            // Render full replay with the same renderer as Viewer/Server Restore.
-                            let to_insert = crate::transcript::render_replay_lines(&items);
-                            if !to_insert.is_empty() {
-                                pane.app_event_tx.send(AppEvent::InsertHistory(to_insert));
-                            }
+                        // Restore (server): relaunch bound to rollout+token, then perform handshake.
+                        if let Some(token) = &meta.provider_token {
+                            pane.app_event_tx.send(AppEvent::RelaunchWithResume {
+                                path: meta.path.clone(),
+                                provider_token: Some(token.clone()),
+                            });
+                            pane.app_event_tx.send(AppEvent::StartHandshake);
+                        } else if std::fs::read_to_string(&meta.path).is_err() {
+                            pane.app_event_tx.send(AppEvent::InsertHistory(vec![
+                                ratatui::text::Line::from("Restore unavailable — no server token.")
+                                    .gray(),
+                                ratatui::text::Line::from("Failed to read rollout for Replay.")
+                                    .red(),
+                                ratatui::text::Line::from(""),
+                            ]));
+                        } else {
+                            pane.app_event_tx.send(AppEvent::InsertHistory(vec![
+                                ratatui::text::Line::from("Restore unavailable — no server token.")
+                                    .gray(),
+                                ratatui::text::Line::from(
+                                    "Use ←/→ to select 'Replay' and press Enter to start.",
+                                )
+                                .gray(),
+                                ratatui::text::Line::from(""),
+                            ]));
                         }
-                        let prompt = format!("Restore this session: {}", meta.path.display());
-                        pane.set_composer_text(prompt);
                     }
                     2 => {
-                        // Experimental resume: plan segmented restore and show plan summary
+                        // Replay: create a NEW session, then show plan and overlay within it.
                         if let Ok(txt) = std::fs::read_to_string(&meta.path) {
                             let mut items_json: Vec<serde_json::Value> = Vec::new();
+                            let mut header: Option<serde_json::Value> = None;
                             for line in txt.lines().skip(1) {
                                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
                                     items_json.push(v);
@@ -352,35 +361,87 @@ impl SessionsPopup {
                             let chunks = segment_items_by_tokens(&response_items, 2000);
                             let total_tokens = approximate_tokens(&response_items);
                             let summary = format!(
-                                "Experimental restore plan: {} segments (~{} tokens).",
+                                "Replay plan: {} segments (~{} tokens).",
                                 chunks.len(),
                                 total_tokens
                             );
-                            // Display an English blurb per request, with plan and keys
-                            let blurb = "Experimental restore: This will restore the entire prior conversation history to the server-side context.\n";
+
+                            // First relaunch as a fresh session (respecting current cwd set by confirmation flow)
+                            pane.app_event_tx.send(AppEvent::RelaunchForReplay);
+
+                            // Now print the plan and start the overlay inside the new session.
+                            let blurb = "Replay: This will restore the entire prior conversation history to the server-side context.\n";
                             pane.app_event_tx.send(AppEvent::InsertHistory(vec![
-                                ratatui::text::Line::from("Experimental restore").magenta(),
+                                ratatui::text::Line::from("Replay").magenta(),
                                 ratatui::text::Line::from(blurb.to_string()),
                                 ratatui::text::Line::from(summary.clone()),
                                 ratatui::text::Line::from("Press Enter to continue; Esc cancels."),
                                 ratatui::text::Line::from(""),
                             ]));
-                            // Show a progress overlay view (always wired with a real plan).
-                            let view = super::restore_progress_view::RestoreProgressView::from_plan(
-                                response_items.clone(),
-                                chunks.clone(),
-                                total_tokens,
-                            );
-                            pane.show_view(Box::new(view));
-                            // Auto-progress all segments once confirmed by the user.
-                            // Simulate Enter presses so the overlay can stream progress updates.
-                            use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-                            for _ in 0..chunks.len() {
-                                pane.app_event_tx.send(crate::app_event::AppEvent::KeyEvent(
-                                    KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-                                ));
+
+                            // Import approved commands from old rollout, if present.
+                            if let Ok(txt2) = std::fs::read_to_string(&meta.path) {
+                                let mut last_approvals: Option<Vec<Vec<String>>> = None;
+                                let mut recorded_tools: Option<Vec<String>> = None;
+                                let mut lines = txt2.lines();
+                                if let Some(h) = lines.next() {
+                                    if let Ok(hv) = serde_json::from_str::<serde_json::Value>(h) {
+                                        header = Some(hv);
+                                    }
+                                }
+                                for line in lines {
+                                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                                        if v.get("record_type").and_then(|t| t.as_str())
+                                            == Some("state")
+                                        {
+                                            if let Some(ac) = v.get("approved_commands") {
+                                                if let Ok(cmds) =
+                                                    serde_json::from_value::<Vec<Vec<String>>>(
+                                                        ac.clone(),
+                                                    )
+                                                {
+                                                    if !cmds.is_empty() {
+                                                        last_approvals = Some(cmds);
+                                                    }
+                                                }
+                                            }
+                                            if let Some(tl) = v.get("mcp_tools_at_recording") {
+                                                if let Ok(list) =
+                                                    serde_json::from_value::<Vec<String>>(
+                                                        tl.clone(),
+                                                    )
+                                                {
+                                                    if !list.is_empty() {
+                                                        recorded_tools = Some(list);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if let Some(cmds) = last_approvals {
+                                    pane.app_event_tx.send(AppEvent::CodexOp(
+                                        codex_core::protocol::Op::ImportApprovedCommands {
+                                            commands: cmds,
+                                        },
+                                    ));
+                                }
+                                if let Some(hv) = header.clone() {
+                                    pane.app_event_tx.send(AppEvent::CodexOp(
+                                        codex_core::protocol::Op::SetReplayReferenceMeta {
+                                            session_meta: hv,
+                                            mcp_tools_at_recording: recorded_tools,
+                                        },
+                                    ));
+                                }
                             }
-                            // Mark this popup complete so the overlay remains active and receives key events.
+
+                            pane.app_event_tx.send(AppEvent::ReplayStart {
+                                items: response_items.clone(),
+                                chunks: chunks.clone(),
+                                token_total: total_tokens,
+                            });
+
                             self.complete = true;
                         } else {
                             pane.app_event_tx.send(AppEvent::InsertHistory(vec![
@@ -393,51 +454,24 @@ impl SessionsPopup {
                         }
                     }
                     _ => {
-                        // Server Restore: insert transcript for parity with viewer, then relaunch.
-                        if let Some(token) = &meta.provider_token {
-                            if let Ok(txt) = std::fs::read_to_string(&meta.path) {
-                                let mut items: Vec<serde_json::Value> = Vec::new();
-                                for line in txt.lines().skip(1) {
-                                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-                                        items.push(v);
-                                    }
-                                }
-                                let to_insert = crate::transcript::render_replay_lines(&items);
-                                if !to_insert.is_empty() {
-                                    pane.app_event_tx.send(AppEvent::InsertHistory(to_insert));
+                        // GPT Restore (local): pre-insert the full rendered transcript for parity,
+                        // then prefill the composer prompt.
+                        if let Ok(txt) = std::fs::read_to_string(&meta.path) {
+                            // Collect JSON items (skip header)
+                            let mut items: Vec<serde_json::Value> = Vec::new();
+                            for line in txt.lines().skip(1) {
+                                if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                                    items.push(v);
                                 }
                             }
-                            pane.app_event_tx.send(AppEvent::RelaunchWithResume {
-                                path: meta.path.clone(),
-                                provider_token: Some(token.clone()),
-                            });
-                        } else {
-                            if std::fs::read_to_string(&meta.path).is_err() {
-                                pane.app_event_tx.send(AppEvent::InsertHistory(vec![
-                                    ratatui::text::Line::from(
-                                        "server resume unavailable — no token",
-                                    )
-                                    .gray(),
-                                    ratatui::text::Line::from(
-                                        "failed to read rollout for experimental restore",
-                                    )
-                                    .red(),
-                                    ratatui::text::Line::from(""),
-                                ]));
-                            } else {
-                                pane.app_event_tx.send(AppEvent::InsertHistory(vec![
-                                    ratatui::text::Line::from(
-                                        "Server restore unavailable — no token.",
-                                    )
-                                    .gray(),
-                                    ratatui::text::Line::from(
-                                        "Use ←/→ to select 'Exp. Restore' and press Enter to start.",
-                                    )
-                                    .gray(),
-                                    ratatui::text::Line::from(""),
-                                ]));
+                            // Render full replay with the same renderer as Viewer/Restore (server).
+                            let to_insert = crate::transcript::render_replay_lines(&items);
+                            if !to_insert.is_empty() {
+                                pane.app_event_tx.send(AppEvent::InsertHistory(to_insert));
                             }
                         }
+                        let prompt = format!("Restore this session: {}", meta.path.display());
+                        pane.set_composer_text(prompt);
                     }
                 }
                 self.complete = true;
@@ -509,11 +543,11 @@ impl<'a> BottomPaneView<'a> for SessionsPopup {
         // Non-search key handling
         if matches!(key_event.code, KeyCode::Char('h') | KeyCode::Char('H')) {
             pane.app_event_tx.send(AppEvent::InsertHistory(vec![
-                ratatui::text::Line::from("Sessions List: View / Restore / Exp. Restore / Server Restore"),
+                ratatui::text::Line::from("Sessions List: View / Restore / Replay / GPT Restore"),
                 ratatui::text::Line::from("←/→ switch · ↑/↓ navigate · PgUp/PgDn fast · Enter select · Esc/Ctrl+C close · A toggle scope · S search · H help"),
-                ratatui::text::Line::from("Restore inserts a full replay into history, then pre-fills the composer."),
-                ratatui::text::Line::from("Exp. Restore runs automatically with a live progress bar; each segment sends and is interrupted to prevent actions."),
-                ratatui::text::Line::from("Server Restore behavior is consistent from list or viewer; when a token is missing, a clear fallback is offered."),
+                ratatui::text::Line::from("GPT Restore inserts a full replay into history, then pre-fills the composer."),
+                ratatui::text::Line::from("Replay runs automatically with a live progress bar; each segment sends and is interrupted to prevent actions."),
+                ratatui::text::Line::from("Restore (server) behavior is consistent from list or viewer; when a token is missing, a clear fallback is offered."),
                 ratatui::text::Line::from("Note: empty sessions are hidden; seed entries (<user_instructions>, <environment_context>) are ignored."),
                 ratatui::text::Line::from("")
             ]));
@@ -585,11 +619,11 @@ impl<'a> BottomPaneView<'a> for SessionsPopup {
                 ..
             } => {
                 pane.app_event_tx.send(AppEvent::InsertHistory(vec![
-                    ratatui::text::Line::from("Sessions: View / Restore / Exp. Restore / Server Restore"),
+                    ratatui::text::Line::from("Sessions: View / Restore / Replay / GPT Restore"),
                     ratatui::text::Line::from("Use ←/→ to choose an action; ↑/↓ to navigate; PgUp/PgDn to page; A toggles scope (This project/All); S opens inline search; H shows this help."),
-                    ratatui::text::Line::from("Restore inserts a full replay into history and continues locally (appends to the same JSONL)."),
-                    ratatui::text::Line::from("Exp. Restore runs automatically with a live progress bar; each segment is interrupted to prevent actions while restoring."),
-                    ratatui::text::Line::from("Server Restore resumes with a stored provider token when available; otherwise a clear fallback is offered. Behavior is the same from list or viewer."),
+                    ratatui::text::Line::from("GPT Restore inserts a full replay into history and continues locally (appends to the same JSONL)."),
+                    ratatui::text::Line::from("Replay runs automatically with a live progress bar; each segment is interrupted to prevent actions while restoring."),
+                    ratatui::text::Line::from("Restore (server) resumes with a stored provider token when available; otherwise a clear fallback is offered. Behavior is the same from list or viewer."),
                     ratatui::text::Line::from("Only sessions with visible user messages are listed; seed/system entries (e.g., initial instructions/environment) are hidden."),
                     ratatui::text::Line::from("")
                 ]));
@@ -612,8 +646,7 @@ impl<'a> BottomPaneView<'a> for SessionsPopup {
                         if let Err(e) = std::env::set_current_dir(&root) {
                             pane.app_event_tx.send(AppEvent::InsertHistory(vec![
                                 ratatui::text::Line::from(format!(
-                                    "Failed to change directory: {}",
-                                    e
+                                    "Failed to change directory: {e}"
                                 ))
                                 .red(),
                                 ratatui::text::Line::from(""),
@@ -690,7 +723,7 @@ impl<'a> BottomPaneView<'a> for SessionsPopup {
             "This project"
         };
         let stats_text = if total == 0 {
-            format!("Showing 0–0 of 0 · {}", scope)
+            format!("Showing 0–0 of 0 · {scope}")
         } else {
             format!(
                 "Showing {}–{} of {} · {}",
@@ -767,15 +800,16 @@ impl<'a> BottomPaneView<'a> for SessionsPopup {
         render_rows(list_area, buf, &rows_all, &self.state, MAX_POPUP_ROWS);
         // Footer: actions/hints or search input
         let footer = if self.search_mode {
-            let mut spans: Vec<Span> = Vec::new();
-            spans.push(Span::raw("Search: "));
-            spans.push(Span::styled(
-                self.search_query.clone(),
-                Style::default().bg(SELECT_HL_BG).fg(SELECT_HL_FG),
-            ));
+            let spans: Vec<Span> = vec![
+                Span::raw("Search: "),
+                Span::styled(
+                    self.search_query.clone(),
+                    Style::default().bg(SELECT_HL_BG).fg(SELECT_HL_FG),
+                ),
+            ];
             Line::from(spans).style(Style::default().fg(Color::White))
         } else {
-            let actions = ["View", "Restore", "Exp. Restore", "Server Restore"];
+            let actions = ["View", "Restore", "Replay", "GPT Restore"];
             let mut spans: Vec<Span> = Vec::new();
             let restorable = self
                 .state
@@ -787,18 +821,18 @@ impl<'a> BottomPaneView<'a> for SessionsPopup {
                 let disabled = i > 0 && !restorable;
                 if i == self.action_idx && !disabled {
                     spans.push(Span::styled(
-                        format!(" {} ", a),
+                        format!(" {a} "),
                         Style::default().bg(SELECT_HL_BG).fg(SELECT_HL_FG),
                     ));
                     spans.push(Span::raw(" "));
                 } else if disabled {
                     spans.push(Span::styled(
-                        format!(" {} ", a),
+                        format!(" {a} "),
                         Style::default().fg(Color::DarkGray),
                     ));
                     spans.push(Span::raw(" "));
                 } else {
-                    spans.push(Span::raw(format!(" {} ", a)));
+                    spans.push(Span::raw(format!(" {a} ")));
                     spans.push(Span::raw(" "));
                 }
             }
@@ -972,7 +1006,11 @@ mod tests {
             has_input_focus: true,
             enhanced_keys_supported: false,
         });
-        let mut popup = SessionsPopup::new(codex_home.clone());
+        let mut popup = SessionsPopup::with_params(
+            codex_home.clone(),
+            true, // show_all to include sessions without recorded project root
+            std::env::current_dir().unwrap_or_else(|_| codex_home.clone()),
+        );
 
         // Open viewer (View)
         popup.handle_key_event(
@@ -1005,7 +1043,19 @@ mod tests {
                 state: KeyEventState::NONE,
             },
         );
-        // 2) Restore (Tab once)
+        // 2) GPT Restore (Tab three times)
+        pane.handle_key_event(KeyEvent {
+            code: KeyCode::Tab,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        });
+        pane.handle_key_event(KeyEvent {
+            code: KeyCode::Tab,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        });
         pane.handle_key_event(KeyEvent {
             code: KeyCode::Tab,
             modifiers: KeyModifiers::NONE,
@@ -1033,7 +1083,7 @@ mod tests {
                 state: KeyEventState::NONE,
             },
         );
-        // 3) Exp. Restore (Tab twice)
+        // 3) Replay (Tab twice)
         pane.handle_key_event(KeyEvent {
             code: KeyCode::Tab,
             modifiers: KeyModifiers::NONE,
@@ -1066,19 +1116,7 @@ mod tests {
                 state: KeyEventState::NONE,
             },
         );
-        // 4) Server Restore (Right thrice)
-        pane.handle_key_event(KeyEvent {
-            code: KeyCode::Right,
-            modifiers: KeyModifiers::NONE,
-            kind: KeyEventKind::Press,
-            state: KeyEventState::NONE,
-        });
-        pane.handle_key_event(KeyEvent {
-            code: KeyCode::Right,
-            modifiers: KeyModifiers::NONE,
-            kind: KeyEventKind::Press,
-            state: KeyEventState::NONE,
-        });
+        // 4) Restore (server) (Right once)
         pane.handle_key_event(KeyEvent {
             code: KeyCode::Right,
             modifiers: KeyModifiers::NONE,
@@ -1095,7 +1133,7 @@ mod tests {
         // Composer remains unchanged when we set token programmatically
         assert_eq!(pane.composer_text_for_test(), before);
 
-        // Missing token path: create file without token, open viewer, select Server Restore
+        // Missing token path: create file without token, open viewer, select Restore (server)
         let d2 = codex_home.join("sessions");
         let header2 = r#"{"timestamp":"2025-08-12T12:20:30.000Z"}"#;
         write_rollout(
@@ -1122,7 +1160,7 @@ mod tests {
                 state: KeyEventState::NONE,
             },
         );
-        // Right to Server Restore
+        // Right to Restore (server)
         let before2 = pane.composer_text_for_test().to_string();
         pane.handle_key_event(KeyEvent {
             code: KeyCode::Right,
@@ -1175,7 +1213,11 @@ mod tests {
             has_input_focus: true,
             enhanced_keys_supported: false,
         });
-        let mut popup = SessionsPopup::new(codex_home.clone());
+        let mut popup = SessionsPopup::with_params(
+            codex_home.clone(),
+            true,
+            std::env::current_dir().unwrap_or_else(|_| codex_home.clone()),
+        );
 
         // Open viewer (View)
         popup.handle_key_event(
@@ -1187,19 +1229,7 @@ mod tests {
                 state: KeyEventState::NONE,
             },
         );
-        // Navigate to Server Restore
-        pane.handle_key_event(KeyEvent {
-            code: KeyCode::Right,
-            modifiers: KeyModifiers::NONE,
-            kind: KeyEventKind::Press,
-            state: KeyEventState::NONE,
-        });
-        pane.handle_key_event(KeyEvent {
-            code: KeyCode::Right,
-            modifiers: KeyModifiers::NONE,
-            kind: KeyEventKind::Press,
-            state: KeyEventState::NONE,
-        });
+        // Navigate to Restore (server)
         pane.handle_key_event(KeyEvent {
             code: KeyCode::Right,
             modifiers: KeyModifiers::NONE,

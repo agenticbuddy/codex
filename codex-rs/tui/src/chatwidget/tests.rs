@@ -152,6 +152,7 @@ fn make_chatwidget_manual() -> (
         session_id: None,
         pending_restore_estimate: None,
         auto_fallback_exp_restore: false,
+        handshake_in_progress: false,
     };
     (widget, rx, op_rx)
 }
@@ -227,13 +228,10 @@ fn auto_fallback_exp_restore_triggers_on_missing_token_background_event() {
     // Simulate background event that indicates missing token
     chat.on_background_event("resume_token_missing".into());
 
-    // Expect an Experimental restore plan announcement in history
+    // Expect a Replay plan announcement in history
     let cells = drain_insert_history(&rx);
     let blob = lines_to_single_string(&cells.concat());
-    assert!(
-        blob.contains("Experimental restore"),
-        "plan header not shown"
-    );
+    assert!(blob.contains("Replay"), "plan header not shown");
     assert!(blob.contains("Plan:"), "plan line not shown");
 }
 
@@ -260,10 +258,7 @@ fn auto_fallback_exp_restore_triggers_on_token_error() {
 
     let cells = drain_insert_history(&rx);
     let blob = lines_to_single_string(&cells.concat());
-    assert!(
-        blob.contains("Experimental restore"),
-        "plan header not shown"
-    );
+    assert!(blob.contains("Replay"), "plan header not shown");
 }
 
 #[test]
@@ -1044,4 +1039,43 @@ fn deltas_then_same_final_message_are_rendered_snapshot() {
         .map(|lines| lines_to_single_string(lines))
         .collect::<String>();
     assert_snapshot!(combined);
+}
+
+#[test]
+fn replay_overlay_auto_advances_and_renders_progressively() {
+    let (mut chat, rx, _op_rx) = make_chatwidget_manual();
+
+    // Craft minimal replay items: one user and one assistant message
+    let item1 = serde_json::json!({
+        "type": "message", "role":"user",
+        "content": [{"type":"input_text","text":"hello"}]
+    });
+    let item2 = serde_json::json!({
+        "type": "message", "role":"assistant",
+        "content": [{"type":"output_text","text":"world"}]
+    });
+    let items = vec![item1, item2];
+    // Two chunks: [0..1], [1..2]
+    let chunks = vec![(0usize, 1usize, 1usize), (1usize, 2usize, 1usize)];
+    chat.start_replay_overlay(items, chunks, 2);
+
+    // Simulate timer ticks to auto-advance both segments
+    chat.on_timer_tick();
+    chat.on_timer_tick();
+
+    // Drain history and verify progressive content and completion summary appear
+    let cells = drain_insert_history(&rx);
+    let combined = cells
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<String>();
+    assert!(combined.contains("hello"), "missing restored user text");
+    assert!(
+        combined.contains("world"),
+        "missing restored assistant text"
+    );
+    assert!(
+        combined.contains("Replay complete:"),
+        "missing completion summary"
+    );
 }

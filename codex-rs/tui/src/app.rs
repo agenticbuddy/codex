@@ -143,7 +143,6 @@ impl App<'_> {
         }
 
         let show_login_screen = should_show_login_screen(&config);
-        let auto_fallback_exp_restore = auto_fallback_exp_restore;
         let app_state = if show_login_screen || show_trust_screen {
             let chat_widget_args = ChatWidgetArgs {
                 config: config.clone(),
@@ -521,6 +520,10 @@ impl App<'_> {
                     let mut new_cfg = self.config.clone();
                     new_cfg.experimental_resume = Some(path);
                     new_cfg.provider_resume_token = provider_token;
+                    // Respect current process cwd (e.g., after user confirmed project root switch)
+                    if let Ok(cwd) = std::env::current_dir() {
+                        new_cfg.cwd = cwd;
+                    }
 
                     let new_widget = Box::new(ChatWidget::new(
                         new_cfg.clone(),
@@ -536,6 +539,72 @@ impl App<'_> {
                     self.config = new_cfg;
                     self.app_state = AppState::Chat { widget: new_widget };
                     self.app_event_tx.send(AppEvent::RequestRedraw);
+                }
+                AppEvent::StartHandshake => {
+                    if let AppState::Chat { widget } = &mut self.app_state {
+                        widget.start_handshake();
+                    }
+                }
+                AppEvent::RelaunchForReplay => {
+                    // Fresh session for Replay (no binding to old rollout, no provider token).
+                    let mut new_cfg = self.config.clone();
+                    new_cfg.experimental_resume = None;
+                    new_cfg.provider_resume_token = None;
+                    if let Ok(cwd) = std::env::current_dir() {
+                        new_cfg.cwd = cwd;
+                    }
+
+                    let new_widget = Box::new(ChatWidget::new(
+                        new_cfg.clone(),
+                        self.server.clone(),
+                        self.app_event_tx.clone(),
+                        None,
+                        Vec::new(),
+                        self.enhanced_keys_supported,
+                        self.auto_fallback_exp_restore,
+                    ));
+
+                    self.config = new_cfg;
+                    self.app_state = AppState::Chat { widget: new_widget };
+                    self.app_event_tx.send(AppEvent::RequestRedraw);
+                }
+                AppEvent::ReplayStart {
+                    items,
+                    chunks,
+                    token_total,
+                } => {
+                    if let AppState::Chat { widget } = &mut self.app_state {
+                        widget.start_replay_overlay(items, chunks, token_total);
+                    }
+                    // Start auto-advance loop
+                    static REPLAY_RUNNING: once_cell::sync::Lazy<
+                        Arc<std::sync::atomic::AtomicBool>,
+                    > = once_cell::sync::Lazy::new(|| {
+                        Arc::new(std::sync::atomic::AtomicBool::new(false))
+                    });
+                    REPLAY_RUNNING.store(true, std::sync::atomic::Ordering::Release);
+                    let tx = self.app_event_tx.clone();
+                    std::thread::spawn(move || {
+                        while REPLAY_RUNNING.load(std::sync::atomic::Ordering::Relaxed) {
+                            std::thread::sleep(std::time::Duration::from_millis(25));
+                            tx.send(AppEvent::ReplayTick);
+                        }
+                    });
+                }
+                AppEvent::ReplayTick => {
+                    if let AppState::Chat { widget } = &mut self.app_state {
+                        widget.on_timer_tick();
+                    }
+                }
+                AppEvent::StopReplayAuto => {
+                    // Stop auto-advance
+                    use std::sync::atomic::Ordering;
+                    static REPLAY_RUNNING: once_cell::sync::Lazy<
+                        Arc<std::sync::atomic::AtomicBool>,
+                    > = once_cell::sync::Lazy::new(|| {
+                        Arc::new(std::sync::atomic::AtomicBool::new(false))
+                    });
+                    REPLAY_RUNNING.store(false, Ordering::Release);
                 }
             }
         }

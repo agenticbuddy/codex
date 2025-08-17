@@ -324,7 +324,7 @@ fn run_ratatui_app(
                             ));
                         }
                     }
-                    if !drift.is_empty() && !(cli.apply_session_settings || cli.keep_current_config)
+                    if !(drift.is_empty() || cli.apply_session_settings || cli.keep_current_config)
                     {
                         let mut msg = String::new();
                         let _ = writeln!(msg, "Configuration differs from session header:");

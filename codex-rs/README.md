@@ -89,22 +89,22 @@ The same setting can be persisted in `~/.codex/config.toml` via the top-level `s
 ### Sessions and Restore
 
 - Browse previous sessions: `codex --history`
-  - Use ←/→ to cycle actions for the selected session: [View] [Resume] [Exp. Resume] [Server Resume].
+  - Use ←/→ to cycle actions for the selected session: [View] [Restore] [Replay] [GPT Restore].
   - Enter performs the selected action; Esc/Ctrl+C closes the popup.
-- View: inserts only user/assistant messages from the saved session into scrollback, auto‑focusing the latest messages.
-- Resume: pre‑fills the composer with `Resume this session: <path>` so you can continue locally.
-- Exp. Resume: prints a short hint for resuming via the experimental flag.
-- Server Resume: attempts to resume using a provider/server resume token if available.
+- View: opens a read‑only session viewer (wrapped to terminal width) and focuses the latest messages.
+- Restore (server): resumes using a stored provider/server resume token if available.
   - Codex persists a `provider_resume_token` (for OpenAI this corresponds to `previous_response_id`) to your session file when a response completes.
-  - The token may appear either in the JSONL header or a subsequent `record_type = "state"` line. The popup reads both.
+  - The token may appear either in the JSONL header or a subsequent `record_type = "state"` line. The popup/viewer reads both.
   - You can also supply a token explicitly with `--resume-server <TOKEN>` to seed the next request.
+- Replay: rebuilds the server context by uploading conversation history in chunks (no actions are taken during restore). Shows a plan and a progress overlay.
+- GPT Restore (local): inserts a full replay into history and pre‑fills the composer with `Restore this session: <path>` for local continuation.
 
 Related flags:
 
 - `--view <rollout.jsonl>`: open a saved rollout in place (read‑only).
-- `--resume <rollout.jsonl>`: continue locally by injecting a resume prompt.
-- `--resume-experimental <rollout.jsonl>`: same, but via an experimental path.
-- `--resume-server <TOKEN>`: resume using a provider/server token; if your saved session contains a token, the popup offers “Server Resume”.
+- `--resume <rollout.jsonl>`: GPT Restore (local) — continue locally by injecting a resume prompt.
+- `--resume-experimental <rollout.jsonl>`: Replay — restore by uploading prior history to rebuild context.
+- `--resume-server <TOKEN>`: Restore (server) — resume using a provider/server token; if your saved session contains a token, the UI offers “Restore”.
 
 Where sessions live: `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`.
 

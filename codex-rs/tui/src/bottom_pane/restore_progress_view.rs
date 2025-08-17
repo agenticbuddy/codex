@@ -111,7 +111,7 @@ impl RestoreProgressView {
                 }
                 Some("function_call") => {
                     let name = v.get("name").and_then(|n| n.as_str()).unwrap_or("tool");
-                    text.push_str(&format!("[tool:{}] ", name));
+                    text.push_str(&format!("[tool:{name}] "));
                     text.push_str(
                         &v.get("arguments")
                             .map(|a| a.to_string())
@@ -144,6 +144,13 @@ impl RestoreProgressView {
                 }));
             pane.app_event_tx
                 .send(crate::app_event::AppEvent::CodexOp(Op::Interrupt));
+            // Also render the items slice into history progressively so the
+            // user sees what was restored as it streams.
+            let lines = crate::transcript::render_replay_lines(&items[s..e]);
+            if !lines.is_empty() {
+                pane.app_event_tx
+                    .send(crate::app_event::AppEvent::InsertHistory(lines));
+            }
         }
         let new_sent = self.token_sent.get().saturating_add(tok);
         self.token_sent.set(new_sent);
@@ -157,6 +164,54 @@ impl RestoreProgressView {
 }
 
 impl<'a> BottomPaneView<'a> for RestoreProgressView {
+    fn on_timer_tick(&mut self, pane: &mut BottomPane<'a>) {
+        if self.canceled.get() || self.complete.get() {
+            return;
+        }
+        if self.items.is_some() {
+            if self.percent.get() < 100 {
+                self.send_next_chunk(pane);
+            }
+        } else {
+            // Status-only mode (no real-path items): advance percent in steps
+            let next = (self.percent.get() + 20).min(100);
+            self.percent.set(next);
+            if next == 100 {
+                self.complete.set(true);
+            }
+        }
+
+        if self.complete.get() {
+            let segs_done = self.cursor.get().min(self.total_segments);
+            let segs = self.total_segments;
+            let toks = self.token_sent.get().max(1);
+            let summary = format!(
+                "Replay complete: {segs_done}/{segs} segments (~{toks} tokens)."
+            );
+            pane.app_event_tx
+                .send(crate::app_event::AppEvent::InsertHistory(vec![
+                    ratatui::text::Line::from(summary),
+                ]));
+            if self.items.is_some() {
+                // Final end-of-restore marker and completion notification (parity with Enter path)
+                pane.app_event_tx.send(crate::app_event::AppEvent::CodexOp(
+                    Op::UserInput {
+                        items: vec![InputItem::Text {
+                            text: "[RESTORE MODE END] Restore complete. Resume normal interaction.".to_string(),
+                        }],
+                    },
+                ));
+                pane.app_event_tx
+                    .send(crate::app_event::AppEvent::RestoreCompleted {
+                        approx_tokens: self.token_sent.get().max(1),
+                        segments: self.total_segments,
+                    });
+                pane.app_event_tx
+                    .send(crate::app_event::AppEvent::StopReplayAuto);
+            }
+        }
+        pane.request_redraw();
+    }
     fn try_consume_approval_request(
         &mut self,
         _request: crate::user_approval_widget::ApprovalRequest,
@@ -181,25 +236,27 @@ impl<'a> BottomPaneView<'a> for RestoreProgressView {
                     }
                     // Keep progress text within the overlay; do not switch to status view.
                     if self.complete.get() {
-                        // Insert full replay into history for parity with the Session Viewer.
-                        if let Some(items) = &self.items {
-                            let lines = crate::transcript::render_replay_lines(items);
-                            if !lines.is_empty() {
-                                pane.app_event_tx
-                                    .send(crate::app_event::AppEvent::InsertHistory(lines));
-                            }
-                        }
                         let segs_done = self.cursor.get().min(self.total_segments);
+                        let segs = self.total_segments;
+                        let toks = self.token_sent.get().max(1);
                         let summary = format!(
-                            "Experimental restore complete: {}/{} segments (~{} tokens).",
-                            segs_done,
-                            self.total_segments,
-                            self.token_sent.get().max(1)
+                            "Replay complete: {segs_done}/{segs} segments (~{toks} tokens)."
                         );
                         pane.app_event_tx
                             .send(crate::app_event::AppEvent::InsertHistory(vec![
                                 ratatui::text::Line::from(summary),
                             ]));
+                        // Send a final end-of-restore marker without interrupt so
+                        // the next user turn is not accidentally suppressed.
+                        if self.items.is_some() {
+                            pane.app_event_tx.send(crate::app_event::AppEvent::CodexOp(
+                                Op::UserInput {
+                                    items: vec![InputItem::Text {
+                                        text: "[RESTORE MODE END] Restore complete. Resume normal interaction.".to_string(),
+                                    }],
+                                },
+                            ));
+                        }
                         // Notify chat layer so it can report provider usage
                         if self.items.is_some() {
                             pane.app_event_tx
@@ -207,6 +264,9 @@ impl<'a> BottomPaneView<'a> for RestoreProgressView {
                                     approx_tokens: self.token_sent.get().max(1),
                                     segments: self.total_segments,
                                 });
+                            // Stop auto-advance loop
+                            pane.app_event_tx
+                                .send(crate::app_event::AppEvent::StopReplayAuto);
                         }
                     }
                 }
@@ -217,7 +277,7 @@ impl<'a> BottomPaneView<'a> for RestoreProgressView {
                 // Do not switch to status view on cancel before start.
                 pane.app_event_tx
                     .send(crate::app_event::AppEvent::InsertHistory(vec![
-                        ratatui::text::Line::from("Experimental restore cancelled by user."),
+                        ratatui::text::Line::from("Replay cancelled by user."),
                     ]));
                 // Only propagate an Interrupt if a restore has actually started.
                 if self.percent.get() > 0 || self.cursor.get() > 0 || self.sent_intro.get() {
@@ -252,13 +312,12 @@ impl<'a> BottomPaneView<'a> for RestoreProgressView {
             return;
         }
         if self.percent.get() == 0 && !self.complete.get() {
-            Line::from("Experimental restore ready — Enter to start; Esc cancels.")
-                .render_ref(area, buf);
+            Line::from("Replay ready — Enter to start; Esc cancels.").render_ref(area, buf);
             return;
         }
         // Progress bar
         let pct = self.percent.get().min(100);
-        let label = format!("Restoring: {:>3}%", pct);
+        let label = format!("Restoring: {pct:>3}%");
         // Compute bar width based on available space
         let total_w = area.width as usize;
         let label_w = label.width();
@@ -270,9 +329,11 @@ impl<'a> BottomPaneView<'a> for RestoreProgressView {
         let fill_w = ((bar_w.saturating_sub(bracket_w)) * pct as usize) / 100;
         let empty_w = bar_w.saturating_sub(bracket_w + fill_w);
         let bar = format!("[{}{}]", "#".repeat(fill_w), "-".repeat(empty_w));
-        let line = format!("{} {}", label, bar);
+        let line = format!("{label} {bar}");
         Line::from(line).render_ref(area, buf);
     }
+
+    // (duplicate impl removed; see single on_timer_tick above)
 }
 
 #[cfg(test)]
@@ -285,7 +346,7 @@ mod tests {
     use std::sync::mpsc::channel;
 
     #[test]
-    fn progresses_to_completion_on_enter() {
+    fn progresses_to_completion_via_ticks() {
         let (tx_raw, _rx) = channel::<AppEvent>();
         let tx = crate::app_event_sender::AppEventSender::new(tx_raw);
         let mut pane = BottomPane::new(BottomPaneParams {
@@ -295,16 +356,7 @@ mod tests {
         });
         let mut view = RestoreProgressView::new(5);
         for _ in 0..5 {
-            <RestoreProgressView as super::BottomPaneView>::handle_key_event(
-                &mut view,
-                &mut pane,
-                KeyEvent {
-                    code: KeyCode::Enter,
-                    modifiers: KeyModifiers::NONE,
-                    kind: KeyEventKind::Press,
-                    state: KeyEventState::NONE,
-                },
-            );
+            <RestoreProgressView as super::BottomPaneView>::on_timer_tick(&mut view, &mut pane);
         }
         assert!(<RestoreProgressView as super::BottomPaneView>::is_complete(
             &view
@@ -336,7 +388,7 @@ mod tests {
     }
 
     #[test]
-    fn no_auto_progress_without_enter() {
+    fn no_auto_progress_without_ticks() {
         let (tx_raw, _rx) = channel::<AppEvent>();
         let tx = crate::app_event_sender::AppEventSender::new(tx_raw);
         let _pane = BottomPane::new(BottomPaneParams {

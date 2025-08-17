@@ -33,23 +33,46 @@ This section summarises the externally visible behaviors introduced or refined.
   - Sessions with no visible user messages are hidden. Seed/system banners (e.g., initial AGENTS.md read, environment context) are ignored and do not create a visible session.
   - Paging: up to 20 rows are shown to reduce scrolling overhead.
   - Key hints include “S” (search) and “H” (help); key labels use the same background highlight as approval modals.
-  - Actions footer shows: “View”, “Restore”, “Exp. Restore”, “Server Restore”. “View” opens a read‑only viewer; other actions operate on the selected session.
+  - Actions footer shows: “View”, “Restore”, “Replay”, “GPT Restore”. “View” opens a read‑only viewer; other actions operate on the selected session.
 
 - Session viewer layout and navigation:
   - Long lines are wrapped to the terminal width. The X–Y / total numerator is computed from these wrapped rows.
   - The header shows the numerator left‑aligned and the session file path right‑aligned (the path is truncated from the left with an ellipsis if space is insufficient).
   - Standard navigation (↑/↓, PgUp/PgDn, Home/End) scrolls by wrapped rows; the numerator updates consistently with what is displayed.
-  - Actions footer shows: “Return”, “Restore”, “Exp. Restore”, “Server Restore”. “Return” возвращает назад к списку сессий.
+- Actions footer shows: “Return”, “Restore”, “Replay”, “GPT Restore”. “Return” returns to the sessions list.
 
 - Restore actions and flows:
-  - Action labels are unified across entry points: in the sessions list — “View / Restore / Exp. Restore / Server Restore”, in the session viewer — “Return / Restore / Exp. Restore / Server Restore”.
-  - When a server token is unavailable, the UI suggests running “Exp. Restore”. The plan summary (segments and ~tokens) показывается только при запуске “Exp. Restore”.
-  - “Exp. Restore” — автоматический: после подтверждения из списка или из просмотрщика восстановление запускается и выполняется целиком без ручных подтверждений каждого сегмента. Для каждого сегмента отправляется преамбула и сразу Interrupt, чтобы модель не действовала на базе восстановленного содержимого. Во время выполнения показывается оверлей с прогресс‑баром “Restoring: [#####…..] NN%”, который обновляется по мере отправки чанков. По завершении в историю вставляется полный реплей с тем же рендерером, что у Viewer/Server Restore.
+- Action labels are unified across entry points: in the sessions list — “View / Restore / Replay / GPT Restore”, in the session viewer — “Return / Restore / Replay / GPT Restore”.
+- Restore (server) now performs a blocking Handshake:
+  - After selecting Restore, the bottom pane shows a shimmering status “Checking server connection…”. The UI remains blocked during the check.
+  - The TUI sends `Op::HandshakeResume` to the server, which validates the stored provider resume token.
+  - On success (“Done”): the overlay is dismissed and the full replay of the selected session is inserted into history for visual continuity; subsequent work continues in that restored session (bound to its JSONL and server token).
+  - On failure (“Fail”): the overlay is dismissed and the UI offers Replay for the same session. A concise plan (segments and ~tokens) is printed followed by the Replay overlay (Enter to proceed, Esc to cancel).
+- When a server token is unavailable, the UI suggests running “Replay”. The plan summary (segments and ~tokens) is shown only when starting “Replay”.
+- “Replay” runs automatically: after confirmation (from the list or viewer) the restore proceeds end‑to‑end without per‑segment confirmations. For each segment we send a preamble and immediately an Interrupt, so the model does not act on restored content. While restoring, a progress overlay is shown: “Restoring: [#####…..] NN%”, updated as chunks are sent. On completion, a full replay is inserted into history using the same renderer as the Viewer/Restore (server).
+ - “Replay” runs automatically and auto‑progresses without simulated key presses. For each segment we send a preamble and immediately an Interrupt, so the model does not act on restored content. While restoring, a progress overlay is shown: “Restoring: [#####…..] NN%”, updated as chunks are sent. On completion, a full replay is inserted into history using the same renderer as the Viewer/Restore (server). A final marker is sent to end the restore mode so the next user turn is not suppressed.
 
 - Search and help:
   - Sessions list: press “S” to open a search prompt in the footer; typing filters on what is displayed (label and, where shown, recorded root). Esc exits, Enter confirms. Matches are highlighted in the label.
   - Session viewer: press “S” to open a search prompt in the footer; typing searches the displayed, wrapped lines. Enter jumps to the first match; “n”/“N” go to next/previous match. Matches are highlighted inline.
   - Press “H” on either screen to print a brief, context‑specific help blurb (what is shown, key bindings, and a one‑liner on restore modes).
+
+### Restore Updates and Conventions
+
+- Unified behavior: all restore variants — `Restore` (server), `Replay`, and `GPT Restore` (local) — behave the same regardless of where they are launched from. The same actions and results are available from both the sessions list and the session viewer.
+- Visual continuity: during preparation and immediately after restore the user sees the same context/output as before the session ended (a full replay of the session is inserted into history using the same renderer as the viewer).
+- New “Restore” (server):
+  - Attempts to continue with the same server connection that existed prior to the interruption while controlling all environment details that affect parity (model, reasoning level/version, available MCP servers, sandbox policy, etc.).
+  - Users may deliberately choose a different model/reasoning level/MCP servers; any behavior drift from such changes is at the user’s risk.
+  - Selecting server Restore effectively switches execution to the restored session, and further work is written to its history. If a new session had been started already, the agent detaches from it; the new session’s in‑memory state is fully overwritten (disk artifacts remain so you can switch back).
+- “Replay” (formerly Experimental restore in TypeScript Codex‑CLI):
+  - Handles cases where the server session cannot be found for any reason (expired, provider error, provider change, incompatible model change, etc.).
+  - We attempt to rebuild context by sending the history to the server “for context only” so the server reconstructs the conversation context. Accuracy is not guaranteed.
+  - This creates a new server session and uploads the entire history in chunks; the restored content is rendered progressively into the transcript while a progress overlay shows status. The new session writes to a new JSONL file; the old rollout remains unchanged. Approved commands recorded in the old session are imported into the new session to preserve executor behavior.
+- Renamed restore modes (for consistency in the UI/docs):
+  - Restore — formerly “Server Restore” (now the primary option).
+  - Replay — formerly “Experimental Restore”.
+  - GPT Restore — formerly “Restore” (local continuation without a server token).
 
 ### Internal Changes
 
@@ -59,15 +82,20 @@ This section summarises the externally visible behaviors introduced or refined.
 
 - Sessions list rendering and filtering:
   - File paths are removed from the list; recorded root appears only in “All sessions”. “This project” excludes sessions with no recorded root.
-  - В режиме “All sessions” для сессий без `recorded_project_root` явно показывается “root: Unknown”.
+- In “All sessions” mode, sessions without `recorded_project_root` explicitly show “root: Unknown”.
 
 - Search implementation:
   - List search filters by displayed fields (label and, when present, recorded root) and updates results live; Esc restores the original list. Matches are highlighted in the label.
   - Viewer search operates over the displayed, wrapped lines; Enter jumps to the first match, “n”/“N” navigate subsequent/previous matches; matches are highlighted inline.
 
 - Server restore and experimental flow:
-  - When a server token is missing, the UI suggests running “Exp. Restore”. The plan summary (segments and ~tokens) появляется только при запуске “Exp. Restore”. Крупные истории аккуратно бьются на сегменты.
-  - Во время “Exp. Restore” сегменты не запускают активные действия модели: после каждого сегмента посылается Interrupt. По завершении — в историю вставляется полный реплей с тем же рендером, что в Session Viewer.
+  - When a server token is missing, the UI suggests running “Replay”. The plan summary (segments and ~tokens) is shown only when starting “Replay”. Large histories are carefully split into segments.
+  - Restore (server) performs a Handshake first; success inserts the full replay and continues; failure offers Replay immediately (no intermediate state is committed).
+  - Replay ports several Restore controls for parity:
+    - Approved commands are imported from the old rollout into the new session for both manual Replay and auto‑fallback Replay.
+    - MCP tools diff: when available, the list of tools recorded in the old rollout is compared to the current environment and missing tools are surfaced as a background notice and recorded in state.
+    - Settings parity: the old session header is provided to the core so it can record a concise `settings_changed` line (from→to) on the first user turn of the new session.
+  - During “Replay” segments do not trigger model actions: after each segment an Interrupt is sent. Segments auto‑advance without key presses and are rendered progressively into history as they are sent; a concise summary is printed at the end.
 
 ### Help
 
@@ -82,7 +110,7 @@ This section summarises the externally visible behaviors introduced or refined.
   - a) User convenience: One consistent way to choose actions with Left/Right arrows and background highlight. It reduces cognitive load by matching the approval modal’s look and feel and makes Enter/Esc behavior predictable.
   - b) Technical necessity: A single selector eliminates per‑screen keybinding drift and reduces edge‑cases around focus management. The uniform navigation logic simplifies state transitions and automated tests.
 
-- Server Restore with clear fallback:
+- Restore (server) with clear fallback:
 
   - a) User convenience: If a server resume token is present, we resume on the server; if not, the UI clearly falls back to local restore and explains why. Users no longer guess what “Resume (server)” will do.
   - b) Technical necessity: Providers only emit a reliable token at `response.completed`. Explicit gating prevents attempts to “resume” an already streaming turn (which can’t be continued) and avoids undefined server behavior.
@@ -111,9 +139,9 @@ This section summarises the externally visible behaviors introduced or refined.
   - a) User convenience: Operators can trigger the same restore modes via flags or UI, depending on their workflow (keyboard‑driven vs. scripted).
   - b) Technical necessity: Feature parity keeps cross‑component assumptions intact, reduces drift between CLIs, and simplifies documentation/testing. Where flags differ, the help output is the source of truth.
 
-### Unified Server Restore path
+### Unified Restore (server) path
 
-- Both the sessions list and the session viewer trigger the same Server Restore flow. After a successful restore, the active chat is fully re‑bound to the selected session: new turns append to the same JSONL and the restored transcript is used to hydrate context. This guarantees identical behavior regardless of where Server Restore was initiated.
+- Both the sessions list and the session viewer trigger the same Restore (server) flow. After a successful restore, the active chat is fully re‑bound to the selected session: new turns append to the same JSONL and the restored transcript is used to hydrate context. This guarantees identical behavior regardless of where Restore (server) was initiated.
 
 ## Internal Changes
 
@@ -143,14 +171,14 @@ This section summarises the externally visible behaviors introduced or refined.
 
 - External behavior:
 
-  - a) User convenience: Selecting “Server Restore” no longer pre‑fills any prompt. Instead, the app quietly arms the next request to use the stored server context (previous_response_id) if available. The UI shows a subtle notice that the token has been applied.
+- a) User convenience: Selecting “Restore” (server) no longer pre‑fills any prompt. Instead, the app quietly arms the next request to use the stored server context (previous_response_id) if available. The UI shows a subtle notice that the token has been applied.
   - b) Technical necessity: Using the server’s stored response ID programmatically (rather than emitting a textual “resume” message) is the most reliable way to continue a session without polluting the transcript. It also avoids accidental side‑effects.
 
 - Internal changes:
 
   - Core protocol: added `Op::SetResumeToken { token }` to update the provider resume token after session configuration.
   - Core protocol: added `Op::HandshakeResume` which emits a `BackgroundEvent(resume_token_confirmed|resume_token_missing)` without touching the transcript; can be used for a “quiet handshake”.
-  - TUI: SessionsPopup/SessionViewer send `SetResumeToken` when “Server Restore” is chosen for a session that contains a stored token; composer text remains unchanged.
+- TUI: SessionsPopup/SessionViewer send `SetResumeToken` when “Restore” (server) is chosen for a session that contains a stored token; composer text remains unchanged.
 
 - Handshake (optional, future):
 
@@ -158,12 +186,12 @@ This section summarises the externally visible behaviors introduced or refined.
   - b) Feasibility: Prefer a non‑advancing provider healthcheck/ping. If a provider requires a text handshake, keep it out of the user transcript and do not advance the session head if possible.
 
 - Fallback:
-  - If the server rejects the token or no token is found, users are offered “Experimental Restore” with an upfront estimate: number of segments and approximate token cost. The TUI shows a short summary in history and opens a restore overlay where Enter proceeds or Esc/Ctrl‑C cancels.
+- If the server rejects the token or no token is found, users are offered “Replay” with an upfront estimate: number of segments and approximate token cost. The TUI shows a short summary in history and opens a restore overlay where Enter proceeds or Esc/Ctrl‑C cancels.
 
-## Experimental Restore (Segmented)
+## Replay (Segmented)
 
 - Planning and estimate:
-  - Both stacks segment the rollout into chunks by approximate tokens. When the user selects Experimental Restore (or when Server Restore is unavailable), the UI shows: “Experimental restore plan: N segments (~T tokens).” This provides an upfront cost preview before proceeding.
+- Both stacks segment the rollout into chunks by approximate tokens. When the user selects Replay (or when Restore is unavailable), the UI shows: “Replay plan: N segments (~T tokens).” This provides an upfront cost preview before proceeding.
 - Progress and control:
   - A compact overlay presents progress; Ctrl‑X cancels. The final line summarizes completion and the approximate tokens sent. When providers return usage, the Rust TUI also surfaces the first post‑restore TokenCount next to the estimate.
 - Real‑path behavior (feature‑flagged):
@@ -176,8 +204,8 @@ Phrasing (TUI):
 
 - Server resume active: “Restoring session using server context…”
 - Server resume unavailable: “Server resume unavailable — no token.”
-- Experimental restore estimate: “Experimental restore plan: N segments (~T tokens).”
-- Cancel: “Experimental restore cancelled by user.”
+- Replay estimate: “Replay plan: N segments (~T tokens).”
+- Cancel: “Replay cancelled by user.”
 
 ## How It Works Now
 
@@ -188,7 +216,7 @@ Phrasing (TUI):
     `{"record_type":"state","provider_resume_token":"resp_..."}`.
 
 - TUI session visibility:
-  - The sessions list and the session viewer are displayed in the TUI bottom pane as modal views. The viewer focuses on the latest context, auto‑scrolling to show the most recent exchanges. For performance in terminals, the viewer renders a capped tail (latest lines) rather than the entire transcript; users can toggle Full History (key `F`) to include tool calls and outputs for reference. Modal overlays such as the Experimental Restore progress appear in the bottom pane and use the standard navigation hints (Enter to advance, Ctrl‑X to cancel). Subtle notices (e.g., server resume handshake) are inserted as small history lines to avoid polluting the main transcript.
+  - The sessions list and the session viewer are displayed in the TUI bottom pane as modal views. The viewer focuses on the latest context, auto‑scrolling to show the most recent exchanges. For performance in terminals, the viewer renders a capped tail (latest lines) rather than the entire transcript; users can toggle Full History (key `F`) to include tool calls and outputs for reference. Modal overlays such as the Replay progress appear in the bottom pane and use the standard navigation hints (Enter to advance, Ctrl‑X to cancel). Subtle notices (e.g., server resume handshake) are inserted as small history lines to avoid polluting the main transcript.
   - Sessions list navigation: Left/Right to switch action; Up/Down to navigate; PageUp/PageDown to move faster; Enter to select; Esc/Ctrl+C to close; `A` toggles “This project” / “All sessions”.
   - Session viewer navigation: Up/Down to scroll; PageUp/PageDown to scroll faster; Home/End to jump to top/bottom; `F` toggles Full History.
   - Status lines: the sessions list and the session viewer display a compact status indicator `start–end / total` just above the footer.
@@ -217,15 +245,15 @@ Phrasing (TUI):
 - Restore modes (sessions list and viewer):
 
   - Return — close the overlay/viewer and return to the composer.
-  - Restore — local continuation: the composer is prefilled with `Resume this session: <path>`.
-  - Exp. Restore — same semantics with an explicit “experimental” label for clarity/change control.
-  - Server Restore — uses the stored token when present; otherwise falls back to local restore and writes an informational notice.
+  - Restore (server) — resumes using the stored provider token when present; otherwise the UI suggests Replay and prints an informational notice.
+  - Replay — rebuilds server context by sending history in chunks (no actions taken during restore).
+  - GPT Restore — local continuation: the composer is prefilled with `Resume this session: <path>`.
 
 - Resume algorithm at a glance (Rust):
 
   1. Read header + items from JSONL.
   2. If any `function_call` lacks a matching output, synthesize an aborted output item and append it to the first pending input on resume.
-  3. If a `provider_resume_token` is present and the operator selects Server Restore (or flags indicate), use it; otherwise use local restore.
+  3. If a `provider_resume_token` is present and the operator selects Restore (server) (or flags indicate), use it; otherwise use local restore.
   4. Start the next turn from a consistent state; never attempt to resume a partially consumed SSE stream.
 
 - Error handling and safeguards:
@@ -304,3 +332,35 @@ This makes the CLI behavior explicit and avoids silently changing environment as
 - When using `--resume-experimental` with `--auto-fallback-exp-restore`, if the provider/server resume token is missing or invalid, the TUI automatically prepares an Experimental Restore plan from the rollout file and opens the restore overlay. If the environment variable `CODEX_TUI_EXPERIMENTAL_RESTORE_SEND=1` is set, the plan is sent immediately instead of requiring a confirmation.
 
 ## Appendix: Tests added
+
+The restore feature set adds and updates tests across the TUI to cover the new flows and guard against regressions.
+
+- TUI Chat widget
+  - `codex-rs/tui/src/chatwidget/tests.rs::auto_fallback_exp_restore_triggers_on_missing_token_background_event`: when a background event indicates a missing server resume token and `--auto-fallback-exp-restore` is enabled, the widget announces a Replay plan and opens the restore overlay.
+  - `codex-rs/tui/src/chatwidget/tests.rs::auto_fallback_exp_restore_triggers_on_token_error`: on server resume errors (e.g., `response.failed: previous_response_not_found`), the widget falls back to Replay and surfaces the plan summary.
+
+- Sessions popup (list)
+  - `codex-rs/tui/src/bottom_pane/sessions_popup.rs::parses_jsonl_sessions_under_nested_dirs`: discovers JSONL rollouts under date‑partitioned subdirectories; validates counts and first‑message preview.
+  - `codex-rs/tui/src/bottom_pane/sessions_popup.rs::sort_sessions_desc_by_timestamp`: ensures newest‑first ordering.
+  - `codex-rs/tui/src/bottom_pane/sessions_popup.rs::esc_and_ctrl_c_close_popup`: confirms Esc and Ctrl+C close the popup without side effects.
+  - `codex-rs/tui/src/bottom_pane/sessions_popup.rs::session_viewer_actions_all_paths`: exercises “View”, “Restore (server)”, “Replay”, and “GPT Restore” from the list via the embedded viewer; verifies Replay opens the overlay and does not overwrite composer text; server Restore uses the stored token and preserves composer text. Also covers the no‑token path for server Restore.
+  - `codex-rs/tui/src/bottom_pane/sessions_popup.rs::server_resume_emits_handshake_and_notice`: selecting server Restore emits a relaunch/handshake event and a subtle notice in history when a provider token is present.
+
+- Session viewer (read‑only)
+  - `codex-rs/tui/src/bottom_pane/session_viewer.rs::viewer_actions_isolated`: validates the footer selector and actions inside the viewer: Return (Enter) closes; GPT Restore pre‑fills composer; Replay opens overlay and leaves composer unchanged; Restore (server) preserves composer.
+
+- Restore progress overlay (Replay)
+  - `codex-rs/tui/src/bottom_pane/restore_progress_view.rs::progresses_to_completion_on_enter`: Enter advances segments to completion; on completion, a full replay is inserted into history plus a summary line and a `RestoreCompleted` signal.
+  - `codex-rs/tui/src/bottom_pane/restore_progress_view.rs::cancel_inserts_history_line`: Esc cancels with a single history line; Interrupt is only sent if any sending began.
+  - `codex-rs/tui/src/bottom_pane/restore_progress_view.rs::no_auto_progress_without_enter`: overlay never advances automatically without Enter.
+
+- Experimental restore utilities
+  - `codex-rs/tui/src/experimental_restore.rs::segments_under_threshold`: greedy segmentation respects the token threshold and covers the entire item range.
+  - `codex-rs/tui/src/experimental_restore.rs::single_over_limit_item_forces_one_item_chunk`: single oversized items form a one‑item chunk to guarantee progress.
+
+How to run:
+- TUI crate tests: `cargo test -p codex-tui`
+- Full workspace (when core/common changed): `cargo test --all-features`
+
+Notes:
+- Tests rely on in‑memory terminals (`ratatui::backend::TestBackend`) and temporary rollout fixtures; no external network is required.

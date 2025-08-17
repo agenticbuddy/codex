@@ -652,7 +652,7 @@ pub(crate) fn new_prompts_output() -> PlainHistoryCell {
 
 pub(crate) fn new_error_event(message: String) -> PlainHistoryCell {
     // Suppress noisy interrupt banner in history; it's expected during
-    // explicit UI-driven interrupts (e.g., Exp. Restore or Ctrl-C).
+    // explicit UI-driven interrupts (e.g., Replay or Ctrl-C).
     if message.trim() == "Turn interrupted" {
         return PlainHistoryCell { lines: Vec::new() };
     }

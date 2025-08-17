@@ -41,4 +41,7 @@ pub(crate) trait BottomPaneView<'a> {
     ) -> Option<ApprovalRequest> {
         Some(request)
     }
+
+    /// Optional timer tick hook for views that need periodic progress.
+    fn on_timer_tick(&mut self, _pane: &mut BottomPane<'a>) {}
 }

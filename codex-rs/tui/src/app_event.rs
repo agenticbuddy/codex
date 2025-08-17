@@ -66,7 +66,7 @@ pub(crate) enum AppEvent {
     },
 
     /// Relaunch chat bound to an existing rollout file and optional provider token.
-    /// Used by Server Restore to fully switch to the selected session so further
+    /// Used by Restore (server) to fully switch to the selected session so further
     /// history is written into it (and context is hydrated from it).
     RelaunchWithResume {
         path: PathBuf,
@@ -76,4 +76,29 @@ pub(crate) enum AppEvent {
     /// Onboarding: result of login_with_chatgpt.
     OnboardingAuthComplete(Result<(), String>),
     OnboardingComplete(ChatWidgetArgs),
+
+    /// Relaunch chat for Replay as a fresh session (no resume binding).
+    /// The handler should respect current process cwd for parity with the
+    /// recorded project root when the caller has already changed it.
+    RelaunchForReplay,
+
+    /// Start Replay in the current chat session by opening the restore
+    /// overlay with a concrete plan. Items must be valid response items
+    /// (already filtered) and chunks specify [start,end,tokens].
+    ReplayStart {
+        items: Vec<serde_json::Value>,
+        chunks: Vec<(usize, usize, usize)>,
+        token_total: usize,
+    },
+
+    /// Periodic tick to auto-advance Replay overlay.
+    ReplayTick,
+
+    /// Stop the auto-advance loop for Replay overlay.
+    StopReplayAuto,
+
+    /// Start a blocking server-resume handshake (Restore flow).
+    /// Shows a status view and sends Op::HandshakeResume; UI remains blocked
+    /// until a background event confirms success or failure.
+    StartHandshake,
 }

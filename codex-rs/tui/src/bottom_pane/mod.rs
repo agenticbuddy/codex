@@ -167,6 +167,23 @@ impl<'a> BottomPane<'a> {
         }
     }
 
+    /// Forward a timer tick to the active view, if any.
+    pub(crate) fn on_timer_tick(&mut self) {
+        if let Some(mut view) = self.active_view.take() {
+            view.on_timer_tick(self);
+            if !view.is_complete() {
+                self.active_view = Some(view);
+            } else if self.is_task_running {
+                let mut v =
+                    status_indicator_view::StatusIndicatorView::new(self.app_event_tx.clone());
+                v.update_text("waiting for model".to_string());
+                self.active_view = Some(Box::new(v));
+                self.status_view_active = true;
+            }
+            self.request_redraw();
+        }
+    }
+
     pub(crate) fn insert_str(&mut self, text: &str) {
         self.composer.insert_str(text);
         self.request_redraw();

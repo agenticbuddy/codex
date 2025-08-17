@@ -55,6 +55,7 @@ mod interrupts;
 use self::interrupts::InterruptManager;
 mod agent;
 use self::agent::spawn_agent;
+use crate::bottom_pane::RestoreProgressView;
 use crate::streaming::controller::AppEventHistorySink;
 use crate::streaming::controller::StreamController;
 use codex_core::ConversationManager;
@@ -91,6 +92,8 @@ pub(crate) struct ChatWidget<'a> {
     // Post-restore estimate to be surfaced on the next TokenCount.
     pending_restore_estimate: Option<(usize, usize)>,
     auto_fallback_exp_restore: bool,
+    // Whether a blocking Restore handshake is in progress.
+    handshake_in_progress: bool,
 }
 
 struct UserMessage {
@@ -121,6 +124,21 @@ impl ChatWidget<'_> {
     #[inline]
     fn mark_needs_redraw(&mut self) {
         self.needs_redraw = true;
+    }
+
+    pub(crate) fn start_replay_overlay(
+        &mut self,
+        items: Vec<serde_json::Value>,
+        chunks: Vec<(usize, usize, usize)>,
+        token_total: usize,
+    ) {
+        let view = RestoreProgressView::from_plan(items, chunks, token_total);
+        self.bottom_pane.show_view(Box::new(view));
+        self.mark_needs_redraw();
+    }
+
+    pub(crate) fn on_timer_tick(&mut self) {
+        self.bottom_pane.on_timer_tick();
     }
     fn flush_answer_stream_with_separator(&mut self) {
         let sink = AppEventHistorySink(self.app_event_tx.clone());
@@ -213,8 +231,7 @@ impl ChatWidget<'_> {
             use ratatui::text::Line as RLine;
             self.app_event_tx
                 .send(AppEvent::InsertHistory(vec![RLine::from(format!(
-                    "Restore summary: {} segments (~{} tokens).",
-                    segments, approx_tokens
+                    "Restore summary: {segments} segments (~{approx_tokens} tokens)."
                 ))]));
         }
     }
@@ -331,19 +348,111 @@ impl ChatWidget<'_> {
         use ratatui::style::Stylize;
         match message.as_str() {
             "resume_token_confirmed" => {
-                self.app_event_tx.send(AppEvent::InsertHistory(vec![
-                    ratatui::text::Line::from("Server resume ready (token confirmed).").gray(),
-                ]));
+                if self.handshake_in_progress {
+                    self.app_event_tx.send(AppEvent::InsertHistory(vec![
+                        ratatui::text::Line::from("Restore: server connection OK.").gray(),
+                    ]));
+                    if let Some(path) = self.config.experimental_resume.as_ref() {
+                        if let Ok(txt) = std::fs::read_to_string(path) {
+                            let mut items: Vec<serde_json::Value> = Vec::new();
+                            for line in txt.lines().skip(1) {
+                                if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                                    items.push(v);
+                                }
+                            }
+                            let to_insert = crate::transcript::render_replay_lines(&items);
+                            if !to_insert.is_empty() {
+                                self.app_event_tx.send(AppEvent::InsertHistory(to_insert));
+                            }
+                        }
+                    }
+                    self.bottom_pane.set_task_running(false);
+                    self.handshake_in_progress = false;
+                } else {
+                    self.app_event_tx.send(AppEvent::InsertHistory(vec![
+                        ratatui::text::Line::from("Server resume ready (token confirmed).").gray(),
+                    ]));
+                }
             }
             "resume_token_missing" => {
-                self.app_event_tx.send(AppEvent::InsertHistory(vec![
-                    ratatui::text::Line::from(
-                        "Server resume token missing; experimental restore is available.",
-                    )
-                    .gray(),
-                ]));
-                if self.auto_fallback_exp_restore {
-                    self.maybe_auto_start_exp_restore();
+                if self.handshake_in_progress {
+                    self.app_event_tx.send(AppEvent::InsertHistory(vec![
+                        ratatui::text::Line::from("Restore: server connection failed.").gray(),
+                    ]));
+                    self.bottom_pane.set_task_running(false);
+                    self.handshake_in_progress = false;
+
+                    if let Some(path) = self.config.experimental_resume.as_ref() {
+                        if let Ok(txt) = std::fs::read_to_string(path) {
+                            let mut items_all: Vec<serde_json::Value> = Vec::new();
+                            for line in txt.lines().skip(1) {
+                                if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                                    items_all.push(v);
+                                }
+                            }
+                            // Import approvals if present.
+                            let mut last_approvals: Option<Vec<Vec<String>>> = None;
+                            for v in &items_all {
+                                if v.get("record_type").and_then(|t| t.as_str()) == Some("state") {
+                                    if let Some(ac) = v.get("approved_commands") {
+                                        if let Ok(cmds) =
+                                            serde_json::from_value::<Vec<Vec<String>>>(ac.clone())
+                                        {
+                                            if !cmds.is_empty() {
+                                                last_approvals = Some(cmds);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if let Some(cmds) = last_approvals {
+                                self.submit_op(codex_core::protocol::Op::ImportApprovedCommands {
+                                    commands: cmds,
+                                });
+                            }
+                            let response_items =
+                                crate::experimental_restore::filter_response_items(&items_all);
+                            if !response_items.is_empty() {
+                                let chunks = crate::experimental_restore::segment_items_by_tokens(
+                                    &response_items,
+                                    2000,
+                                );
+                                let total_tokens = crate::experimental_restore::approximate_tokens(
+                                    &response_items,
+                                );
+                                self.app_event_tx.send(AppEvent::InsertHistory(vec![
+                                    ratatui::text::Line::from("Replay").magenta(),
+                                    ratatui::text::Line::from(
+                                        "Restore failed — offering Replay for this session.",
+                                    ),
+                                    ratatui::text::Line::from(format!(
+                                        "Plan: {} segments (~{} tokens).",
+                                        chunks.len(),
+                                        total_tokens
+                                    )),
+                                    ratatui::text::Line::from(
+                                        "Press Enter to continue; Esc cancels.",
+                                    ),
+                                    ratatui::text::Line::from(""),
+                                ]));
+                                self.app_event_tx.send(AppEvent::ReplayStart {
+                                    items: response_items,
+                                    chunks,
+                                    token_total: total_tokens,
+                                });
+                            }
+                        }
+                    }
+                } else {
+                    self.app_event_tx.send(AppEvent::InsertHistory(vec![
+                        ratatui::text::Line::from(
+                            "Server resume token missing; experimental restore is available.",
+                        )
+                        .gray(),
+                    ]));
+                    if self.auto_fallback_exp_restore {
+                        self.maybe_auto_start_exp_restore();
+                    }
                 }
             }
             _ => {
@@ -352,14 +461,10 @@ impl ChatWidget<'_> {
                     let count = parts.next().unwrap_or("");
                     let names = parts.next().unwrap_or("");
                     let line = if names.is_empty() {
-                        format!(
-                            "Some MCP tools recorded in the session are missing ({}).",
-                            count
-                        )
+                        format!("Some MCP tools recorded in the session are missing ({count}).")
                     } else {
                         format!(
-                            "Some MCP tools recorded in the session are missing ({}): {}",
-                            count, names
+                            "Some MCP tools recorded in the session are missing ({count}): {names}"
                         )
                     };
                     self.app_event_tx.send(AppEvent::InsertHistory(vec![
@@ -368,6 +473,17 @@ impl ChatWidget<'_> {
                 }
             }
         }
+    }
+
+    pub(crate) fn start_handshake(&mut self) {
+        // Block UI with status indicator and trigger handshake.
+        self.bottom_pane.set_task_running(true);
+        self.app_event_tx
+            .send(AppEvent::InsertHistory(vec![ratatui::text::Line::from(
+                "Checking server connection…",
+            )]));
+        self.handshake_in_progress = true;
+        self.submit_op(Op::HandshakeResume);
     }
 
     fn maybe_auto_start_exp_restore(&mut self) {
@@ -382,6 +498,53 @@ impl ChatWidget<'_> {
                         items_json.push(v);
                     }
                 }
+                // Import approved commands before starting overlay (parity with manual Replay)
+                let mut last_approvals: Option<Vec<Vec<String>>> = None;
+                for v in &items_json {
+                    if v.get("record_type").and_then(|t| t.as_str()) == Some("state") {
+                        if let Some(ac) = v.get("approved_commands") {
+                            if let Ok(cmds) = serde_json::from_value::<Vec<Vec<String>>>(ac.clone())
+                            {
+                                if !cmds.is_empty() {
+                                    last_approvals = Some(cmds);
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(cmds) = last_approvals {
+                    self.submit_op(codex_core::protocol::Op::ImportApprovedCommands {
+                        commands: cmds,
+                    });
+                }
+                // Send replay reference meta (header + recorded tools) so core can compute diffs
+                if let Some(hline) = txt.lines().next() {
+                    if let Ok(hv) = serde_json::from_str::<serde_json::Value>(hline) {
+                        self.submit_op(codex_core::protocol::Op::SetReplayReferenceMeta {
+                            session_meta: hv,
+                            mcp_tools_at_recording: None,
+                        });
+                    }
+                }
+                // Also try to extract recorded tools from state lines
+                let mut recorded_tools: Option<Vec<String>> = None;
+                for v in &items_json {
+                    if v.get("record_type").and_then(|t| t.as_str()) == Some("state") {
+                        if let Some(tl) = v.get("mcp_tools_at_recording") {
+                            if let Ok(list) = serde_json::from_value::<Vec<String>>(tl.clone()) {
+                                if !list.is_empty() {
+                                    recorded_tools = Some(list);
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(tl) = recorded_tools {
+                    self.submit_op(codex_core::protocol::Op::SetReplayReferenceMeta {
+                        session_meta: serde_json::json!({}),
+                        mcp_tools_at_recording: Some(tl),
+                    });
+                }
                 let response_items =
                     crate::experimental_restore::filter_response_items(&items_json);
                 if response_items.is_empty() {
@@ -390,9 +553,9 @@ impl ChatWidget<'_> {
                 let chunks =
                     crate::experimental_restore::segment_items_by_tokens(&response_items, 2000);
                 let total_tokens = crate::experimental_restore::approximate_tokens(&response_items);
-                let blurb = "Experimental restore: attempting to restore prior conversation history automatically (server resume unavailable).";
+                let blurb = "Replay: attempting to restore prior conversation history automatically (server resume unavailable).";
                 self.app_event_tx.send(AppEvent::InsertHistory(vec![
-                    ratatui::text::Line::from("Experimental restore").magenta(),
+                    ratatui::text::Line::from("Replay").magenta(),
                     ratatui::text::Line::from(blurb.to_string()),
                     ratatui::text::Line::from(format!(
                         "Plan: {} segments (~{} tokens).",
@@ -656,6 +819,7 @@ impl ChatWidget<'_> {
             session_id: None,
             pending_restore_estimate: None,
             auto_fallback_exp_restore,
+            handshake_in_progress: false,
         }
     }
 

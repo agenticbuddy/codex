@@ -247,6 +247,7 @@ fn extract_plain_text_from_message(v: &Value) -> String {
 }
 
 /// User/assistant with markdown for assistant messages and a "codex" header like live view.
+#[allow(dead_code)]
 pub(crate) fn render_user_assistant_markdown_lines(items: &[Value]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for v in items {
@@ -325,7 +326,7 @@ pub(crate) fn render_full_markdown_lines(items: &[Value]) -> Vec<String> {
                                 .filter_map(|s| s.as_str().map(|s| s.to_string()))
                                 .collect()
                         })
-                        .unwrap_or_else(|| Vec::new());
+                        .unwrap_or_else(Vec::new);
                     let parsed = v
                         .get("parsed")
                         .and_then(|p| {
@@ -489,7 +490,7 @@ pub(crate) fn render_full_markdown_lines(items: &[Value]) -> Vec<String> {
                     .get("arguments")
                     .map(|a| a.to_string())
                     .unwrap_or("{}".to_string());
-                out.push(format!("tool: {} args: {}", name, args));
+                out.push(format!("tool: {name} args: {args}"));
             }
             Some("function_call_output") => {
                 if v.get("call_id")
@@ -507,11 +508,11 @@ pub(crate) fn render_full_markdown_lines(items: &[Value]) -> Vec<String> {
                         }
                     }
                     if !buf.is_empty() {
-                        out.push(format!("tool.out: {}", buf));
+                        out.push(format!("tool.out: {buf}"));
                     }
                 } else if let Some(t) = v.get("output_text").and_then(|t| t.as_str()) {
                     if !t.is_empty() {
-                        out.push(format!("tool.out: {}", t));
+                        out.push(format!("tool.out: {t}"));
                     }
                 }
             }
@@ -593,7 +594,7 @@ pub(crate) fn render_replay_lines(items: &[Value]) -> Vec<Line<'static>> {
                                 .filter_map(|s| s.as_str().map(|s| s.to_string()))
                                 .collect()
                         })
-                        .unwrap_or_else(|| Vec::new());
+                        .unwrap_or_else(Vec::new);
                     let parsed = v
                         .get("parsed")
                         .and_then(|p| {

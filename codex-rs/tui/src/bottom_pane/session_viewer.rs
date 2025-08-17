@@ -36,10 +36,10 @@ pub(crate) struct SessionViewer {
 }
 
 // UI constants and helpers
-const ACTION_LABELS: [&str; 4] = ["Return", "Restore", "Exp. Restore", "Server Restore"];
+const ACTION_LABELS: [&str; 4] = ["Return", "Restore", "Replay", "GPT Restore"];
 #[inline]
 fn format_header_showing(start: usize, end: usize, total: usize) -> String {
-    format!("Showing {}–{} of {} lines", start, end, total)
+    format!("Showing {start}–{end} of {total} lines")
 }
 
 impl SessionViewer {
@@ -90,10 +90,10 @@ impl SessionViewer {
 
     fn has_user_messages(&self) -> bool {
         for v in &self.items {
-            if v.get("type").and_then(|t| t.as_str()) == Some("message") {
-                if v.get("role").and_then(|r| r.as_str()) == Some("user") {
-                    return true;
-                }
+            if v.get("type").and_then(|t| t.as_str()) == Some("message")
+                && v.get("role").and_then(|r| r.as_str()) == Some("user")
+            {
+                return true;
             }
         }
         false
@@ -188,12 +188,159 @@ impl<'a> BottomPaneView<'a> for SessionViewer {
                         self.complete = true;
                     }
                     1 => {
-                        // Restore (local) – only if session has messages
+                        // Restore (server) – perform handshake via provider token; else, guide to Replay
                         if !self.has_user_messages() {
                             pane.app_event_tx
                                 .send(crate::app_event::AppEvent::InsertHistory(vec![
                                     ratatui::text::Line::from(
                                         "Restore is unavailable for an empty session.",
+                                    )
+                                    .gray(),
+                                    ratatui::text::Line::from(""),
+                                ]));
+                        } else if let Some(tok) = &self.provider_token {
+                            pane.app_event_tx.send(
+                                crate::app_event::AppEvent::RelaunchWithResume {
+                                    path: self.path.clone(),
+                                    provider_token: Some(tok.clone()),
+                                },
+                            );
+                            pane.app_event_tx
+                                .send(crate::app_event::AppEvent::StartHandshake);
+                            self.complete = true;
+                        } else {
+                            pane.app_event_tx
+                                .send(crate::app_event::AppEvent::InsertHistory(vec![
+                                    ratatui::text::Line::from(
+                                        "Restore unavailable — no server token.",
+                                    )
+                                    .gray(),
+                                    ratatui::text::Line::from(
+                                        "Use ←/→ to select 'Replay' and press Enter to start.",
+                                    )
+                                    .gray(),
+                                    ratatui::text::Line::from(""),
+                                ]));
+                        }
+                    }
+                    2 => {
+                        // Replay – create a NEW session, then show plan and overlay
+                        if !self.has_user_messages() {
+                            pane.app_event_tx
+                                .send(crate::app_event::AppEvent::InsertHistory(vec![
+                                    ratatui::text::Line::from(
+                                        "Replay is unavailable for an empty session.",
+                                    )
+                                    .gray(),
+                                    ratatui::text::Line::from(""),
+                                ]));
+                        } else {
+                            let items_all = Self::read_items(&self.path);
+                            let items =
+                                crate::experimental_restore::filter_response_items(&items_all);
+                            let chunks = segment_items_by_tokens(&items, 2000);
+                            let total_tokens = approximate_tokens(&items);
+                            let summary = format!(
+                                "Replay plan: {} segments (~{} tokens).",
+                                chunks.len(),
+                                total_tokens
+                            );
+                            // Relaunch as a fresh session first (cwd parity is handled by SessionsPopup if needed).
+                            pane.app_event_tx
+                                .send(crate::app_event::AppEvent::RelaunchForReplay);
+
+                            let blurb = "Replay: This will restore the entire prior conversation history to the server-side context.";
+                            pane.app_event_tx
+                                .send(crate::app_event::AppEvent::InsertHistory(vec![
+                                    ratatui::text::Line::from("Replay").magenta(),
+                                    ratatui::text::Line::from(blurb.to_string()),
+                                    ratatui::text::Line::from(summary),
+                                    ratatui::text::Line::from(
+                                        "Press Enter to continue; Esc cancels.",
+                                    ),
+                                    ratatui::text::Line::from(""),
+                                ]));
+                            // Import approvals and send replay reference meta if present
+                            if let Ok(txt2) = std::fs::read_to_string(&self.path) {
+                                let mut last_approvals: Option<Vec<Vec<String>>> = None;
+                                let mut recorded_tools: Option<Vec<String>> = None;
+                                let mut lines = txt2.lines();
+                                if let Some(h) = lines.next() {
+                                    if let Ok(hv) = serde_json::from_str::<serde_json::Value>(h) {
+                                        // Send header first; tools list may follow below
+                                        pane.app_event_tx.send(
+                                            crate::app_event::AppEvent::CodexOp(
+                                                codex_core::protocol::Op::SetReplayReferenceMeta {
+                                                    session_meta: hv,
+                                                    mcp_tools_at_recording: None,
+                                                },
+                                            ),
+                                        );
+                                    }
+                                }
+                                for line in lines {
+                                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                                        if v.get("record_type").and_then(|t| t.as_str())
+                                            == Some("state")
+                                        {
+                                            if let Some(ac) = v.get("approved_commands") {
+                                                if let Ok(cmds) =
+                                                    serde_json::from_value::<Vec<Vec<String>>>(
+                                                        ac.clone(),
+                                                    )
+                                                {
+                                                    if !cmds.is_empty() {
+                                                        last_approvals = Some(cmds);
+                                                    }
+                                                }
+                                            }
+                                            if let Some(tl) = v.get("mcp_tools_at_recording") {
+                                                if let Ok(list) =
+                                                    serde_json::from_value::<Vec<String>>(
+                                                        tl.clone(),
+                                                    )
+                                                {
+                                                    if !list.is_empty() {
+                                                        recorded_tools = Some(list);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if let Some(cmds) = last_approvals {
+                                    pane.app_event_tx.send(crate::app_event::AppEvent::CodexOp(
+                                        codex_core::protocol::Op::ImportApprovedCommands {
+                                            commands: cmds,
+                                        },
+                                    ));
+                                }
+                                if let Some(tl) = recorded_tools {
+                                    pane.app_event_tx.send(crate::app_event::AppEvent::CodexOp(
+                                        codex_core::protocol::Op::SetReplayReferenceMeta {
+                                            session_meta: serde_json::json!({}),
+                                            mcp_tools_at_recording: Some(tl),
+                                        },
+                                    ));
+                                }
+                            }
+
+                            pane.app_event_tx
+                                .send(crate::app_event::AppEvent::ReplayStart {
+                                    items: items,
+                                    chunks: chunks.clone(),
+                                    token_total: total_tokens,
+                                });
+                            self.complete = true; // Close viewer so overlay gets focus
+                        }
+                    }
+                    _ => {
+                        // GPT Restore (local)
+                        if !self.has_user_messages() {
+                            pane.app_event_tx
+                                .send(crate::app_event::AppEvent::InsertHistory(vec![
+                                    ratatui::text::Line::from(
+                                        "GPT Restore is unavailable for an empty session.",
                                     )
                                     .gray(),
                                     ratatui::text::Line::from(""),
@@ -212,98 +359,6 @@ impl<'a> BottomPaneView<'a> for SessionViewer {
                             self.complete = true;
                         }
                     }
-                    2 => {
-                        // Experimental – show plan and require confirmation; then show overlay
-                        if !self.has_user_messages() {
-                            pane.app_event_tx
-                                .send(crate::app_event::AppEvent::InsertHistory(vec![
-                                    ratatui::text::Line::from(
-                                        "Experimental restore is unavailable for an empty session.",
-                                    )
-                                    .gray(),
-                                    ratatui::text::Line::from(""),
-                                ]));
-                        } else {
-                            let items_all = Self::read_items(&self.path);
-                            let items =
-                                crate::experimental_restore::filter_response_items(&items_all);
-                            let chunks = segment_items_by_tokens(&items, 2000);
-                            let total_tokens = approximate_tokens(&items);
-                            let summary = format!(
-                                "Experimental restore plan: {} segments (~{} tokens).",
-                                chunks.len(),
-                                total_tokens
-                            );
-                            let blurb = "Experimental restore: This will restore the entire prior conversation history to the server-side context.";
-                            pane.app_event_tx
-                                .send(crate::app_event::AppEvent::InsertHistory(vec![
-                                    ratatui::text::Line::from("Experimental restore").magenta(),
-                                    ratatui::text::Line::from(blurb.to_string()),
-                                    ratatui::text::Line::from(summary),
-                                    ratatui::text::Line::from(
-                                        "Press Enter to continue; Esc cancels.",
-                                    ),
-                                    ratatui::text::Line::from(""),
-                                ]));
-                            let seg_count = chunks.len();
-                            let view = super::restore_progress_view::RestoreProgressView::from_plan(
-                                items,
-                                chunks,
-                                total_tokens,
-                            );
-                            pane.show_view(Box::new(view));
-                            // Auto-progress all segments without requiring Enter presses.
-                            use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-                            for _ in 0..seg_count {
-                                pane.app_event_tx.send(crate::app_event::AppEvent::KeyEvent(
-                                    KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-                                ));
-                            }
-                            // Close the viewer so the overlay captures input.
-                            self.complete = true;
-                        }
-                    }
-                    _ => {
-                        // Server Restore
-                        if !self.has_user_messages() {
-                            pane.app_event_tx
-                                .send(crate::app_event::AppEvent::InsertHistory(vec![
-                                    ratatui::text::Line::from(
-                                        "Server restore is unavailable for an empty session.",
-                                    )
-                                    .gray(),
-                                    ratatui::text::Line::from(""),
-                                ]));
-                        } else if let Some(tok) = &self.provider_token {
-                            // Insert viewed transcript with full styling to preserve formatting.
-                            let to_insert = crate::transcript::render_replay_lines(&self.items);
-                            if !to_insert.is_empty() {
-                                pane.app_event_tx
-                                    .send(crate::app_event::AppEvent::InsertHistory(to_insert));
-                            }
-                            // Fully relaunch chat bound to this rollout and token.
-                            pane.app_event_tx.send(
-                                crate::app_event::AppEvent::RelaunchWithResume {
-                                    path: self.path.clone(),
-                                    provider_token: Some(tok.clone()),
-                                },
-                            );
-                            self.complete = true;
-                        } else {
-                            pane.app_event_tx
-                                .send(crate::app_event::AppEvent::InsertHistory(vec![
-                                ratatui::text::Line::from(
-                                    "Server restore unavailable — no token.",
-                                )
-                                .gray(),
-                                ratatui::text::Line::from(
-                                    "Use ←/→ to select 'Exp. Restore' and press Enter to start.",
-                                )
-                                .gray(),
-                                ratatui::text::Line::from(""),
-                            ]));
-                        }
-                    }
                 }
             }
             KeyCode::Esc => {
@@ -319,12 +374,12 @@ impl<'a> BottomPaneView<'a> for SessionViewer {
             }
             KeyCode::Char('h') | KeyCode::Char('H') => {
                 pane.app_event_tx.send(crate::app_event::AppEvent::InsertHistory(vec![
-                    ratatui::text::Line::from("Session Viewer: Return / Restore / Exp. Restore / Server Restore"),
+                    ratatui::text::Line::from("Session Viewer: Return / Restore / Replay / GPT Restore"),
                     ratatui::text::Line::from("Use ←/→ to choose an action; ↑/↓/PgUp/PgDn to scroll; Home/End to jump; S starts search; H shows this help."),
                     ratatui::text::Line::from("Long lines wrap to fit the terminal width; the header shows the visible range and the right-aligned file path (truncated from the left if needed)."),
-                    ratatui::text::Line::from("Restore inserts a full replay into history, then pre-fills the composer."),
-                    ratatui::text::Line::from("Exp. Restore runs automatically with a live progress bar; each segment sends and is interrupted to prevent actions."),
-                    ratatui::text::Line::from("Server Restore behavior is the same from list or viewer; if a token is unavailable or invalid, you’ll be guided to Experimental Restore."),
+                    ratatui::text::Line::from("GPT Restore inserts a full replay into history, then pre-fills the composer for local continuation."),
+                    ratatui::text::Line::from("Replay runs automatically with a live progress bar; each segment is sent and interrupted to prevent actions while restoring."),
+                    ratatui::text::Line::from("Restore (server) behaves the same from list or viewer; if a token is unavailable or invalid, you’ll be guided to Replay."),
                     ratatui::text::Line::from("")
                 ]));
             }
@@ -376,8 +431,8 @@ impl<'a> BottomPaneView<'a> for SessionViewer {
                         let mut idx = self.scroll_top.get();
                         if matches!(key_event.code, KeyCode::Char('n')) {
                             let mut found = None;
-                            for i in (idx + 1)..lines.len() {
-                                if lines[i].to_lowercase().contains(&q) {
+                            for (i, line) in lines.iter().enumerate().skip(idx + 1) {
+                                if line.to_lowercase().contains(&q) {
                                     found = Some(i);
                                     break;
                                 }
@@ -385,18 +440,16 @@ impl<'a> BottomPaneView<'a> for SessionViewer {
                             if let Some(i) = found {
                                 idx = i;
                             }
-                        } else {
-                            if idx > 0 {
-                                let mut found = None;
-                                for i in (0..idx).rev() {
-                                    if lines[i].to_lowercase().contains(&q) {
-                                        found = Some(i);
-                                        break;
-                                    }
+                        } else if idx > 0 {
+                            let mut found = None;
+                            for i in (0..idx).rev() {
+                                if lines[i].to_lowercase().contains(&q) {
+                                    found = Some(i);
+                                    break;
                                 }
-                                if let Some(i) = found {
-                                    idx = i;
-                                }
+                            }
+                            if let Some(i) = found {
+                                idx = i;
                             }
                         }
                         self.scroll_top.set(idx.min(cur_max));
@@ -474,13 +527,13 @@ impl<'a> BottomPaneView<'a> for SessionViewer {
                             }
                             acc.insert(0, ch);
                         }
-                        r = format!("…{}", acc);
+                        r = format!("…{acc}");
                     }
-                    format!("{} {}", left, r)
+                    format!("{left} {r}")
                 }
             } else {
                 let spaces = " ".repeat(total_w - left_w - right_w);
-                format!("{}{}{}", left, spaces, right)
+                format!("{left}{spaces}{right}")
             };
             (text, applied_anchor, start)
         };
@@ -609,12 +662,13 @@ impl<'a> BottomPaneView<'a> for SessionViewer {
         use ratatui::style::Style;
         use ratatui::text::{Line, Span};
         let footer = if self.search_mode {
-            let mut spans: Vec<Span> = Vec::new();
-            spans.push(Span::raw("Search: "));
-            spans.push(Span::styled(
-                self.search_query.clone(),
-                Style::default().bg(SELECT_HL_BG).fg(SELECT_HL_FG),
-            ));
+            let spans: Vec<Span> = vec![
+                Span::raw("Search: "),
+                Span::styled(
+                    self.search_query.clone(),
+                    Style::default().bg(SELECT_HL_BG).fg(SELECT_HL_FG),
+                ),
+            ];
             Line::from(spans)
         } else {
             let labels = ACTION_LABELS;
@@ -622,12 +676,12 @@ impl<'a> BottomPaneView<'a> for SessionViewer {
             for (i, l) in labels.iter().enumerate() {
                 if i == self.action_idx {
                     spans.push(Span::styled(
-                        format!(" {} ", l),
+                        format!(" {l} "),
                         Style::default().bg(SELECT_HL_BG).fg(SELECT_HL_FG),
                     ));
                     spans.push(Span::raw(" "));
                 } else {
-                    spans.push(Span::raw(format!(" {} ", l)));
+                    spans.push(Span::raw(format!(" {l} ")));
                     spans.push(Span::raw(" "));
                 }
             }
@@ -705,7 +759,7 @@ mod tests {
         );
         assert!(<SessionViewer as super::BottomPaneView>::is_complete(&v));
 
-        // Restore
+        // GPT Restore (local)
         let mut v = SessionViewer::new(
             path.clone(),
             Some("resp_1".into()),
@@ -713,16 +767,18 @@ mod tests {
             false,
             std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir()),
         );
-        <SessionViewer as super::BottomPaneView>::handle_key_event(
-            &mut v,
-            &mut pane,
-            KeyEvent {
-                code: KeyCode::Right,
-                modifiers: KeyModifiers::NONE,
-                kind: KeyEventKind::Press,
-                state: KeyEventState::NONE,
-            },
-        );
+        for _ in 0..3 {
+            <SessionViewer as super::BottomPaneView>::handle_key_event(
+                &mut v,
+                &mut pane,
+                KeyEvent {
+                    code: KeyCode::Right,
+                    modifiers: KeyModifiers::NONE,
+                    kind: KeyEventKind::Press,
+                    state: KeyEventState::NONE,
+                },
+            );
+        }
         <SessionViewer as super::BottomPaneView>::handle_key_event(
             &mut v,
             &mut pane,
@@ -738,7 +794,7 @@ mod tests {
                 .starts_with("Restore this session:")
         );
 
-        // Exp. Restore
+        // Replay
         let mut v = SessionViewer::new(
             path.clone(),
             Some("resp_1".into()),
@@ -769,11 +825,11 @@ mod tests {
                 state: KeyEventState::NONE,
             },
         );
-        // Experimental restore now opens an overlay and prints a plan blurb; composer text remains unchanged
+        // Replay now opens an overlay and prints a plan blurb; composer text remains unchanged
         let txt_after = pane.composer_text_for_test().to_string();
         assert_eq!(txt_after, before_exp);
 
-        // Server Restore
+        // Restore (server)
         let mut v = SessionViewer::new(
             path.clone(),
             Some("resp_1".into()),
@@ -781,7 +837,7 @@ mod tests {
             false,
             std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir()),
         );
-        for _ in 0..3 {
+        for _ in 0..1 {
             <SessionViewer as super::BottomPaneView>::handle_key_event(
                 &mut v,
                 &mut pane,
